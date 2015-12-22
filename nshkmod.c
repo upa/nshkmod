@@ -38,6 +38,14 @@ MODULE_DESCRIPTION ("network service header kernel module implementation");
 
 #define NSH_VXLAN_PORT	60000
 #define NSH_VXLAN_IPV4_HEADROOM	(16 + 8 + 16 + 16) /* UDP+VXLAN+NSH-MD1*/
+#define NSH_VXLAN_TTL	64
+
+#define VXLAN_GPE_NSH_FLAGS 0x0C000000	/* set next protocol */
+#define VXLAN_GPE_PROTO_IPV4	0x01
+#define VXLAN_GPE_PROTO_IPV6	0x02
+#define VXLAN_GPE_PROTO_ETH	0x03
+#define VXLAN_GPE_PROTO_NSH	0x04
+#define VXLAN_GPE_PROTO_MPLS	0x05
 
 
 static int nshkmod_net_id;
@@ -49,7 +57,6 @@ struct nsh_dev {
 	struct list_head	list;	/* nsh_net->dev_list */
 	struct rcu_head		rcu;
 
-	struct net 		* net;
 	struct net_device	* dev;
 
 	__u32	key;	/* SPI+SI. 0 means not assigned  */
@@ -64,9 +71,17 @@ struct nsh_dev {
 
 /* remote node (next node of the path) infromation */
 struct nsh_dst {
-	__u8	enca_type;
+	__u8	encap_type;
 	__u32	vni;		/* vni for vxlan encap */
 	__be32	remote_ip;	/* XXX: should support IPv6 */
+	__be32	local_ip;	/* XXX: sould support IPv6 */
+};
+
+enum {
+	NSH_ENCAP_TYPE_VXLAN,
+	NSH_ENCAP_TYPE_ETH,	/* not implemented */
+	NSH_ENCAP_TYPE_GRE,	/* not implemented */
+	NSH_ENCAP_TYPE_GUE	/* not implemented */
 };
 
 /* nsh_table entry. SPI+SI -> Dst (dev or remote) */
@@ -182,11 +197,10 @@ nsh_destroy_table (struct nsh_net * nnet)
 	return;
 }
 
-static netdev_tx_t
-nsh_xmit (struct sk_buff * skb, struct net_device * dev)
+static int
+nsh_recv (struct sk_buff * skb)
 {
-	/* TODO: */
-	return NETDEV_TX_OK;
+	return 0;
 }
 
 static int
@@ -194,6 +208,93 @@ nsh_vxlan_udp_encap_recv (struct sock * sk, struct sk_buff * skb)
 {
 	/* TODO: */
 	return 0;
+}
+
+static netdev_tx_t
+nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
+		struct nsh_dev * ndev, struct nsh_table * nt)
+{
+	int err;
+	struct flowi4 fl4;
+	struct rtable * rt;
+	struct vxlanhdr * vxh;
+
+	memset (&fl4, 0, sizeof (fl4));
+	fl4.daddr = nt->rdst->remote_ip;
+	fl4.saddr = nt->rdst->local_ip;
+
+	rt = ip_route_output_key (dev_net (ndev->dev), &fl4);
+	if (IS_ERR (rt)) {
+		netdev_dbg (ndev->dev, "no route found to %pI4\n",
+			    (struct in_addr *)&nt->rdst->remote_ip);
+		ndev->dev->stats.tx_carrier_errors++;
+		ndev->dev->stats.tx_dropped++;
+		return -NETDEV_TX_OK;
+	}
+
+	err = skb_cow_head (skb, NSH_VXLAN_IPV4_HEADROOM);
+	if (unlikely (err)) {
+		kfree_skb (skb);
+		return err;
+	}
+
+	vxh = (struct vxlanhdr *) __skb_push (skb, sizeof (*vxh));
+	vxh->vx_flags = htonl (VXLAN_GPE_NSH_FLAGS | VXLAN_GPE_PROTO_NSH);
+	vxh->vx_vni = nt->rdst->vni;
+
+	return udp_tunnel_xmit_skb (nnet->sock, rt, skb, nt->rdst->local_ip,
+				    nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
+				    NSH_VXLAN_PORT, NSH_VXLAN_PORT, nnet->net);
+}
+
+static netdev_tx_t
+nsh_xmit (struct sk_buff * skb, struct net_device * dev)
+{
+	int rc;
+	struct pcpu_sw_netstats * tx_stats;
+	struct nsh_dev * ndev = netdev_priv (dev);
+	struct nsh_net * nnet = net_generic (dev_net (dev), nshkmod_net_id);
+	struct nsh_table * nt;
+
+	nt = nsh_find_table (nnet, ndev->key);
+	if (!nt) {
+		netdev_dbg (dev, "path is not assigned\n");
+		return NETDEV_TX_OK;
+	}
+
+	if (nt->rdev) {
+		/* nexthop is nsh interface in this machine. */
+		nsh_recv (skb);
+		goto update_stats;
+	}
+
+	if (nt->rdst) {
+		switch (nt->rdst->encap_type) {
+		case NSH_ENCAP_TYPE_VXLAN :
+			rc = nsh_xmit_vxlan (skb, nnet, ndev, nt);
+			break;
+		default :
+			netdev_dbg (dev, "invalid encap type %d\n",
+				    nt->rdst->encap_type);
+			goto tx_err;
+		}
+	}
+
+	if (rc != NETDEV_TX_OK)
+		goto tx_err;
+
+update_stats:
+	u64_stats_update_begin (&tx_stats->syncp);
+	tx_stats->tx_packets++;
+	tx_stats->tx_bytes += skb->len;
+	u64_stats_update_end (&tx_stats->syncp);
+
+	return NETDEV_TX_OK;
+
+tx_err:
+	dev->stats.tx_errors++;
+
+	return NETDEV_TX_OK;
 }
 
 /* setup stats when device is created */
@@ -278,15 +379,13 @@ static int
 nsh_newlink (struct net * net, struct net_device * dev,
 	     struct nlattr *tb [], struct nlattr * data[])
 {
-	/* XXX: path,destination and device mapping is done after link
-	 * creation by generic netlink and iproute2. newlink only does
-	 * register_netdevice. */
+	/* XXX: path, destination and device mapping is configured by
+	 * user or orchestrator through generic netlink after link
+	 * creation. so, newlink only does register_netdevice. */
 
 	int err;
 	struct nsh_net * nnet = net_generic (net, nshkmod_net_id);
 	struct nsh_dev * ndev = netdev_priv (dev);
-
-	ndev->net = net;
 
 	err = register_netdevice (dev);
 	if (err) {
@@ -304,7 +403,7 @@ nsh_dellink (struct net_device * dev, struct list_head * head)
 {
 	unsigned int n;
 	struct nsh_dev * ndev = netdev_priv (dev);
-	struct nsh_net * nnet = net_generic (ndev->net, nshkmod_net_id);
+	struct nsh_net * nnet = net_generic (dev_net (dev), nshkmod_net_id);
 
 	/* remove this device from nsh table */
 	for (n = 0; n < NSH_HASH_SIZE; n++) {
@@ -335,7 +434,7 @@ static struct rtnl_link_ops nshkmod_link_ops __read_mostly = {
 static struct socket *
 nsh_vxlan_create_sock (struct net * net, __be16 port)
 {
-	/* XXX: vxlan_skb_xmit does have API to configure flags in
+	/* XXX: vxlan_skb_xmit does not have API to configure flags in
 	 * vxlan header (kernel 3.19) that is needed for VXLAN-GPE.
 	 * So, normal udp socket and udp_tunnel_xmit are used. */
 

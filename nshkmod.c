@@ -83,16 +83,104 @@ struct nsh_table {
 
 	struct nsh_dev	* rdev;
 	struct nsh_dst	* rdst;
+
+	/* XXX: nsh_net->nsh_table[n] should be locked when add or delete */
 };
 
 /* per net_namespace structure */
 struct nsh_net {
-#define NSH_HASH_SIZE	(1<< 8)	
+	struct net	* net;
+
+#define NSH_HASH_BITS	8
+#define NSH_HASH_SIZE	(1 << NSH_HASH_BITS)
 	struct hlist_head	nsh_table[NSH_HASH_SIZE]; /* nsh_table hash */
 	struct list_head	dev_list;	/* nsh_dev list*/
 	struct socket		* sock;		/* udp tunnel socket */
 };
 
+
+static inline struct hlist_head *
+nsh_table_head (struct nsh_net * nnet, __u32 key) {
+	return &nnet->nsh_table[hash_32 (key, NSH_HASH_BITS)];
+}
+
+static struct nsh_table *
+nsh_find_table (struct nsh_net * nnet, __u32 key)
+{
+	struct hlist_head * head = nsh_table_head (nnet, key);
+	struct nsh_table * nt;
+
+	hlist_for_each_entry_rcu (nt, head, hlist) {
+		if (key == nt->key)
+			return nt;
+	}
+
+	return NULL;
+}
+
+static int
+nsh_add_table (struct nsh_net * nnet, __u32 key, struct nsh_dev * rdev,
+	       struct nsh_dst * rdst)
+{
+	struct nsh_table * nt;
+
+	nt = kmalloc (sizeof (*nt), GFP_KERNEL);
+	if (!nt) {
+		pr_debug (PRNSH "%s:fail to alloc memory ", __func__);
+		return -ENOMEM;
+	}
+	memset (nt, 0, sizeof (*nt));
+
+	nt->net	= nnet->net;
+	nt->key = key;
+	nt->spi = key >> 8;
+	nt->si	= key & 0x000000FF;
+	nt->rdev = rdev;
+	nt->rdst = rdst;	/* which one (rdev or rdst) must be NULL */
+
+	hlist_add_head_rcu (&nt->hlist, nsh_table_head (nnet, key));
+
+	return 0;
+}
+
+static void
+nsh_delete_table (struct nsh_table * nt)
+{
+	hlist_del_rcu (&nt->hlist);
+	kfree_rcu (nt, rcu);
+}
+
+static void
+nsh_free_table (struct rcu_head * head)
+{
+	struct nsh_table * nt = container_of (head, struct nsh_table, rcu);
+
+	if (nt->rdst)
+		kfree (nt->rdst);
+	kfree (nt);
+
+	return;
+}
+
+static void
+nsh_destroy_table (struct nsh_net * nnet)
+{
+	unsigned int n;
+
+	for (n = 0; n < NSH_HASH_SIZE; n++) {
+		struct hlist_node * ptr, * tmp;
+
+		hlist_for_each_safe (ptr, tmp, &nnet->nsh_table[n]) {
+			struct nsh_table * nt;
+
+			nt = container_of (ptr, struct nsh_table, hlist);
+			hlist_del_rcu (&nt->hlist);
+			call_rcu (&nt->rcu, nsh_free_table);
+		}
+	}
+
+	return;
+}
 
 static netdev_tx_t
 nsh_xmit (struct sk_buff * skb, struct net_device * dev)
@@ -229,6 +317,7 @@ nsh_dellink (struct net_device * dev, struct list_head * head)
 	}
 	
 	list_del_rcu (&ndev->list);
+
 	unregister_netdevice_queue (dev, head);
 
 	return;
@@ -248,7 +337,7 @@ nsh_vxlan_create_sock (struct net * net, __be16 port)
 {
 	/* XXX: vxlan_skb_xmit does have API to configure flags in
 	 * vxlan header (kernel 3.19) that is needed for VXLAN-GPE.
-	 * So, normal udp socket and udp_tunnel_xmit is used. */
+	 * So, normal udp socket and udp_tunnel_xmit are used. */
 
 	int err;
 	struct socket * sock;
@@ -284,15 +373,13 @@ nshkmod_init_net (struct net * net)
 		INIT_HLIST_HEAD (&nnet->nsh_table[n]);
 
 	INIT_LIST_HEAD (&nnet->dev_list);
+	nnet->net = net;
 
 	nnet->sock = nsh_vxlan_create_sock (net, htons (NSH_VXLAN_PORT));
 	if (IS_ERR (nnet->sock)) {
 		printk (KERN_ERR PRNSH "failed to add vxlan udp socket\n");
 		return -EINVAL;
 	}
-
-	printk (KERN_INFO PRNSH "nsh kmod version %s loaded\n",
-		NSHKMOD_VERSION);
 
 	return 0;
 }
@@ -316,12 +403,9 @@ nshkmod_exit_net (struct net * net)
 	}
 	rtnl_unlock ();
 
-	/* TODO: destroy all nsh_dst and nsh_able */
+	nsh_destroy_table (nnet);
 
 	udp_tunnel_sock_release (nnet->sock);
-
-	printk (KERN_INFO PRNSH "nsh kmod version %s unloaded\n",
-		NSHKMOD_VERSION);
 
 	return;
 }
@@ -342,15 +426,20 @@ nshkmod_init_module (void)
 
 	rc = register_pernet_subsys (&nshkmod_net_ops);
 	if (rc)
-		goto out;
+		goto netns_failed;
 
 	rc = rtnl_link_register (&nshkmod_link_ops);
 	if (rc)
 		goto rtnl_failed;
 
+	printk (KERN_INFO PRNSH "nsh kmod version %s loaded\n",
+		NSHKMOD_VERSION);
+
+	return 0;
+
 rtnl_failed:
 	unregister_pernet_subsys (&nshkmod_net_ops);
-out:
+netns_failed:
 	return rc;
 }
 module_init (nshkmod_init_module);
@@ -358,6 +447,12 @@ module_init (nshkmod_init_module);
 static void __exit
 nshkmod_exit_module (void)
 {
+	rtnl_link_unregister (&nshkmod_link_ops);
+	unregister_pernet_subsys (&nshkmod_net_ops);
+
+	printk (KERN_INFO PRNSH "nsh kmod version %s unloaded\n",
+		NSHKMOD_VERSION);
+
 	return;
 }
 module_exit (nshkmod_exit_module);

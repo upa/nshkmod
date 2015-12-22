@@ -3,7 +3,6 @@
  * based on https://tools.ietf.org/html/draft-ietf-sfc-nsh-01
  */
 
-
 #ifndef DEBUG
 #define DEBUG
 #endif
@@ -19,6 +18,7 @@
 #include <net/sock.h>
 #include <net/route.h>
 #include <net/ip6_route.h>
+#include <net/udp_tunnel.h>
 #include <net/vxlan.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
@@ -90,20 +90,65 @@ struct nsh_net {
 #define NSH_HASH_SIZE	(1<< 8)	
 	struct hlist_head	nsh_table[NSH_HASH_SIZE]; /* nsh_table hash */
 	struct list_head	dev_list;	/* nsh_dev list*/
-	struct vxlan_sock	* vs;		/* vxlan socket */
+	struct socket		* sock;		/* udp tunnel socket */
 };
 
 
-void
-vxlan_rcv (struct vxlan_sock * vs, struct sk_buff * skb, __be32 key)
+static netdev_tx_t
+nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 {
 	/* TODO: */
-	return;
+	return NETDEV_TX_OK;
 }
 
+static int
+nsh_vxlan_udp_encap_recv (struct sock * sk, struct sk_buff * skb)
+{
+	/* TODO: */
+	return 0;
+}
+
+/* setup stats when device is created */
+static int
+nsh_init (struct net_device * dev)
+{
+	dev->tstats = netdev_alloc_pcpu_stats (struct pcpu_sw_netstats);
+	if (!dev->tstats)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static void
+nsh_uninit (struct net_device * dev)
+{
+	free_percpu (dev->tstats);
+}
+
+static int
+nsh_open (struct net_device * dev)
+{
+	/* XXX: validation needed? */
+	return 0;
+}
+
+static int
+nsh_stop (struct net_device * dev)
+{
+	/* nothing to be done. */
+	return 0;
+}
 
 static const struct net_device_ops nsh_netdev_ops = {
-	
+	.ndo_init		= nsh_init,
+	.ndo_uninit		= nsh_uninit,
+	.ndo_open		= nsh_open,
+	.ndo_stop		= nsh_stop,
+	.ndo_start_xmit	       	= nsh_xmit,
+	.ndo_get_stats64	= ip_tunnel_get_stats64,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= eth_mac_addr,
 };
 
 
@@ -198,6 +243,37 @@ static struct rtnl_link_ops nshkmod_link_ops __read_mostly = {
 	.dellink	= nsh_dellink,
 };
 
+static struct socket *
+nsh_vxlan_create_sock (struct net * net, __be16 port)
+{
+	/* XXX: vxlan_skb_xmit does have API to configure flags in
+	 * vxlan header (kernel 3.19) that is needed for VXLAN-GPE.
+	 * So, normal udp socket and udp_tunnel_xmit is used. */
+
+	int err;
+	struct socket * sock;
+	struct udp_port_cfg udp_conf;
+	struct udp_tunnel_sock_cfg tunnel_cfg;
+
+	memset (&udp_conf, 0, sizeof (udp_conf));
+
+	/* XXX: should support IPv6 */
+	udp_conf.family = AF_INET;
+	udp_conf.local_ip.s_addr = INADDR_ANY;
+	udp_conf.local_udp_port = port;
+
+	err = udp_sock_create (net, &udp_conf, &sock);
+	if (err < 0)
+		return ERR_PTR (err);
+
+	tunnel_cfg.encap_type = 1;
+	tunnel_cfg.encap_rcv = nsh_vxlan_udp_encap_recv;
+	tunnel_cfg.encap_destroy = NULL;
+	setup_udp_tunnel_sock (net, sock, &tunnel_cfg);
+
+	return sock;
+}
+
 static __net_init int
 nshkmod_init_net (struct net * net)
 {
@@ -209,10 +285,9 @@ nshkmod_init_net (struct net * net)
 
 	INIT_LIST_HEAD (&nnet->dev_list);
 
-	nnet->vs = vxlan_sock_add (net, NSH_VXLAN_PORT, vxlan_rcv, NULL,
-				   true, 0);
-	if (IS_ERR (nnet->vs)) {
-		printk (KERN_ERR PRNSH "failed to add vxlan socket\n");
+	nnet->sock = nsh_vxlan_create_sock (net, htons (NSH_VXLAN_PORT));
+	if (IS_ERR (nnet->sock)) {
+		printk (KERN_ERR PRNSH "failed to add vxlan udp socket\n");
 		return -EINVAL;
 	}
 
@@ -243,7 +318,7 @@ nshkmod_exit_net (struct net * net)
 
 	/* TODO: destroy all nsh_dst and nsh_able */
 
-	vxlan_sock_release (nnet->vs);
+	udp_tunnel_sock_release (nnet->sock);
 
 	printk (KERN_INFO PRNSH "nsh kmod version %s unloaded\n",
 		NSHKMOD_VERSION);

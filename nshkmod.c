@@ -62,10 +62,6 @@ struct nsh_dev {
 		key |= si;			\
 	} while (0)
 
-#define nsh_dev_key(nd) ((nd)->nsh_table : (nd)->nsh_table->key ? NULL)
-#define nsh_dev_spi(nd) ((nd)->nsh_table : (nd)->nsh_table->spi ? NULL)
-#define nsh_dev_si(nd) ((nd)->nsh_table : (nd)->nsh_table->si ? NULL)
-
 /* remote node (next node of the path) infromation */
 struct nsh_dst {
 	__u8	enca_type;
@@ -82,7 +78,7 @@ struct nsh_table {
 
 
 	__u32	key;	/* SPI+SI */
-	__u8	spi;	/* service path index */
+	__u32	spi;	/* service path index */
 	__u8	si;	/* service index */
 
 	struct nsh_dev	* rdev;
@@ -193,7 +189,7 @@ nsh_dellink (struct net_device * dev, struct list_head * head)
 	return;
 }
 
-static struct rtnl_link_ops nsh_link_ops __read_mostly = {
+static struct rtnl_link_ops nshkmod_link_ops __read_mostly = {
 	.kind		= "nsh",
 	.maxtype	= 0,
 	.priv_size	= sizeof (struct nsh_dev),
@@ -236,7 +232,7 @@ nshkmod_exit_net (struct net * net)
 
 	rtnl_lock ();
 	for_each_netdev_safe (net, dev, aux)
-		if (dev->rtnl_link_ops == &nsh_link_ops)
+		if (dev->rtnl_link_ops == &nshkmod_link_ops)
 			unregister_netdevice_queue (dev, &list);
 
 	list_for_each_entry_safe (ndev, next, &nnet->dev_list, list) {
@@ -273,6 +269,12 @@ nshkmod_init_module (void)
 	if (rc)
 		goto out;
 
+	rc = rtnl_link_register (&nshkmod_link_ops);
+	if (rc)
+		goto rtnl_failed;
+
+rtnl_failed:
+	unregister_pernet_subsys (&nshkmod_net_ops);
 out:
 	return rc;
 }

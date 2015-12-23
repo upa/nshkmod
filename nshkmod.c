@@ -1,6 +1,5 @@
 /* nshkmod.c 
- * nsh kernel module implementation.
- * based on https://tools.ietf.org/html/draft-ietf-sfc-nsh-01
+ * NSH kernel module implementation.
  */
 
 #ifndef DEBUG
@@ -26,7 +25,70 @@
 #include <net/genetlink.h>
 
 
-#include "nshkmod.h"
+/*
+ *
+ * Network Service Header format.
+ * https://tools.ietf.org/html/draft-ietf-sfc-nsh-01
+ *
+ * Base Heder
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * |Ver|O|C|R|R|R|R|R|R|   Length  |    MD Type    | Next Protocol |
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *
+ * Service Path Header
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * |          Service Path ID                      | Service Index |
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *
+ * MD-type 1, four Context Header, 4-byt each.
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * |                Mandatory Context Header                       |
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * |                Mandatory Context Header                       |
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * |                Mandatory Context Header                       |
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * |                Mandatory Context Header                       |
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *
+ *
+ * It only supports MD-type 1 and MD-type 2 with 0 byte (No) Conetxt
+ * header and Ethernet for next protocol (rtnl_link_ops).
+ *
+ */
+
+struct nsh_base_hdr {
+	__u8	flags;	/* Ver, O, C, Rx4 */
+	__u8	length;	/* Rx2, Length*/
+	__u8	mdtype;
+	__u8	protocol;
+};
+#define NSH_BASE_CHECK_VERSION(f, v) (((f) & 0xC0) == v)
+#define NSH_BASE_OAM(f) ((f) & 0x20)
+#define NSH_BASE_CRITCAL(f) ((f) & 0x10)
+#define NSH_BASE_LENGTH(l) ((l) & 0x3F)
+
+#define NSH_BASE_MDTYPE1	0x01
+#define NSH_BASE_MDTYPE2	0x02
+
+#define NSH_BASE_PROTO_IPV4	0x01	/* XXX: not supported */
+#define NSH_BASE_PROTO_IPV6	0x02	/* XXX: not supported */
+#define NSH_BASE_PROTO_ETH	0x03
+
+
+struct nsh_path_hdr {
+	__be32 spisi;	/* SPI + SI */
+};
+
+struct nsh_ctx_type1 {
+	__be32	ctx[4];
+};
+
+struct nsh_vlm_hdr {
+	__be16	class;
+	__u8	type;	/* 1st bit is C */
+	__u8	length;	/* first 3 bits are reserved */
+};
 
 #define NSHKMOD_VERSION "0.0"
 MODULE_VERSION (NSHKMOD_VERSION);
@@ -36,11 +98,15 @@ MODULE_DESCRIPTION ("network service header kernel module implementation");
 
 #define PRNSH	"nshkmod: "
 
+#define VXLAN_HLEN	(sizeof (struct vxlanhdr) + sizeof (struct udphdr))
+#define NSH_MDTYPE2_0_HLEN	(sizeof (struct nsh_base_hdr) + \
+				 sizeof (struct nsh_path_hdr))
+
 #define NSH_VXLAN_PORT	60000
 #define NSH_VXLAN_IPV4_HEADROOM	(16 + 8 + 16 + 16) /* UDP+VXLAN+NSH-MD1*/
 #define NSH_VXLAN_TTL	64
 
-#define VXLAN_GPE_NSH_FLAGS 0x0C000000	/* set next protocol */
+#define VXLAN_GPE_FLAGS 0x0C000000	/* set next protocol */
 #define VXLAN_GPE_PROTO_IPV4	0x01
 #define VXLAN_GPE_PROTO_IPV6	0x02
 #define VXLAN_GPE_PROTO_ETH	0x03
@@ -48,7 +114,7 @@ MODULE_DESCRIPTION ("network service header kernel module implementation");
 #define VXLAN_GPE_PROTO_MPLS	0x05
 
 
-static int nshkmod_net_id;
+static int nsh_net_id;
 static u32 nshkmod_salt __read_mostly;
 
 
@@ -59,20 +125,15 @@ struct nsh_dev {
 
 	struct net_device	* dev;
 
-	__u32	key;	/* SPI+SI. 0 means not assigned  */
-	__u32	sp;	/* service path index */
+	__be32	key;	/* SPI+SI. 0 means not assigned  */
+	__be32	spi;	/* service path index */
 	__u8	si;	/* service index */
 };
-#define nsh_key_by_spi_si(key, spi, si)\
-	do {					\
-		(key |= spi) <<= 8;		\
-		key |= si;			\
-	} while (0)
 
 /* remote node (next node of the path) infromation */
 struct nsh_dst {
 	__u8	encap_type;
-	__u32	vni;		/* vni for vxlan encap */
+	__be32	vni;		/* vni for vxlan encap */
 	__be32	remote_ip;	/* XXX: should support IPv6 */
 	__be32	local_ip;	/* XXX: sould support IPv6 */
 };
@@ -92,8 +153,8 @@ struct nsh_table {
 	unsigned long		updated;	/* jiffies */
 
 
-	__u32	key;	/* SPI+SI */
-	__u32	spi;	/* service path index */
+	__be32	key;	/* SPI+SI */
+	__be32	spi;	/* service path index */
 	__u8	si;	/* service index */
 
 	struct nsh_dev	* rdev;
@@ -115,12 +176,12 @@ struct nsh_net {
 
 
 static inline struct hlist_head *
-nsh_table_head (struct nsh_net * nnet, __u32 key) {
+nsh_table_head (struct nsh_net * nnet, __be32 key) {
 	return &nnet->nsh_table[hash_32 (key, NSH_HASH_BITS)];
 }
 
 static struct nsh_table *
-nsh_find_table (struct nsh_net * nnet, __u32 key)
+nsh_find_table (struct nsh_net * nnet, __be32 key)
 {
 	struct hlist_head * head = nsh_table_head (nnet, key);
 	struct nsh_table * nt;
@@ -134,7 +195,7 @@ nsh_find_table (struct nsh_net * nnet, __u32 key)
 }
 
 static int
-nsh_add_table (struct nsh_net * nnet, __u32 key, struct nsh_dev * rdev,
+nsh_add_table (struct nsh_net * nnet, __be32 key, struct nsh_dev * rdev,
 	       struct nsh_dst * rdst)
 {
 	struct nsh_table * nt;
@@ -200,14 +261,76 @@ nsh_destroy_table (struct nsh_net * nnet)
 static int
 nsh_recv (struct sk_buff * skb)
 {
+	int hdrlen;
+	struct nsh_base_hdr * nbh;
+	struct nsh_path_hdr * nph;
+	struct nsh_table * nt;
+	struct nsh_net * nnet = net_generic (sock_net (skb->sk), nsh_net_id);
+	struct pcpu_sw_netstats * stats;
+
+	nbh = (struct nsh_base_hdr *) skb->data;
+	nph = (struct nsh_path_hdr *) (nbh + 1);
+
+	if (unlikely (!NSH_BASE_CHECK_VERSION (nbh->flags, 0))) {
+		pr_debug (PRNSH "invalid nsh version flag %#x\n", nbh->flags);
+		return -1;
+	}
+	if (NSH_BASE_OAM (nbh->flags)) {
+		pr_debug (PRNSH "oam is not supported %#x\n", nbh->flags);
+		return -1;
+	}
+	if (NSH_BASE_OAM (nbh->flags)) {
+		pr_debug (PRNSH "oam is not supported %#x\n", nbh->flags);
+		return -1;
+	}
+	/* XXX: C bit should be considered on software ? */
+
+	nt = nsh_find_table (nnet, nph->spisi);
+	if (!nt | !nt->rdev) {
+		return -1;
+	}
+
+	hdrlen = NSH_BASE_LENGTH (nbh->length) << 2;
+	__skb_pull (skb, hdrlen);
+	skb_reset_mac_header (skb);
+	skb_reset_network_header (skb);
+
+	stats = this_cpu_ptr (nt->rdev->dev->tstats);
+	u64_stats_update_begin (&stats->syncp);
+	stats->rx_packets++;
+	stats->rx_bytes++;
+	u64_stats_update_end (&stats->syncp);
+
+	netif_rx (skb);
+
 	return 0;
 }
 
 static int
 nsh_vxlan_udp_encap_recv (struct sock * sk, struct sk_buff * skb)
 {
-	/* TODO: */
-	return 0;
+	/* pop udp and vxlan header. checking spi si and forwarding to
+	 * appropriate interface are done by nsh_recv (outer
+	 * encapsulation protocol independent). */
+
+	struct vxlanhdr * vxh;
+
+	if (!pskb_may_pull (skb, VXLAN_HLEN))
+		goto err;
+
+	vxh = (struct vxlanhdr *) (udp_hdr (skb) + 1);
+	if (vxh->vx_flags != (VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH)) {
+		netdev_dbg (skb->dev, "invalid vxlan flags %#x\n",
+			    ntohl (vxh->vx_flags));
+		goto err;
+	}
+
+	__skb_pull (skb, VXLAN_HLEN);
+
+	return nsh_recv (skb);
+
+err:
+	return 1;
 }
 
 static netdev_tx_t
@@ -235,11 +358,11 @@ nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 	err = skb_cow_head (skb, NSH_VXLAN_IPV4_HEADROOM);
 	if (unlikely (err)) {
 		kfree_skb (skb);
-		return err;
+		return -NETDEV_TX_OK;
 	}
 
 	vxh = (struct vxlanhdr *) __skb_push (skb, sizeof (*vxh));
-	vxh->vx_flags = htonl (VXLAN_GPE_NSH_FLAGS | VXLAN_GPE_PROTO_NSH);
+	vxh->vx_flags = htonl (VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH);
 	vxh->vx_vni = nt->rdst->vni;
 
 	return udp_tunnel_xmit_skb (nnet->sock, rt, skb, nt->rdst->local_ip,
@@ -253,8 +376,10 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 	int rc;
 	struct pcpu_sw_netstats * tx_stats;
 	struct nsh_dev * ndev = netdev_priv (dev);
-	struct nsh_net * nnet = net_generic (dev_net (dev), nshkmod_net_id);
+	struct nsh_net * nnet = net_generic (dev_net (dev), nsh_net_id);
 	struct nsh_table * nt;
+	struct nsh_base_hdr * nbh;
+	struct nsh_path_hdr * nph;
 
 	nt = nsh_find_table (nnet, ndev->key);
 	if (!nt) {
@@ -280,6 +405,24 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 		}
 	}
 
+	/* add NSH MD-TYPE 2 without metadata */
+	rc = skb_cow_head (skb, NSH_MDTYPE2_0_HLEN);
+	if (unlikely (rc)) {
+		netdev_dbg (dev, "failed to skb_cow_head\n");
+		kfree_skb (skb);
+		goto tx_err;
+	}
+
+	nbh = (struct nsh_base_hdr *) __skb_push (skb, sizeof (*nbh));
+	nbh->flags	= 0;
+	nbh->length	= NSH_MDTYPE2_0_HLEN >> 2;	/* 4byte word */
+	nbh->mdtype	= NSH_BASE_MDTYPE2;
+	nbh->protocol	= NSH_BASE_PROTO_ETH;
+
+	nph = (struct nsh_path_hdr *) __skb_push (skb, sizeof (*nph));
+	nph->spisi = ndev->key;
+
+	rc = nsh_xmit_vxlan (skb, nnet, ndev, nt);
 	if (rc != NETDEV_TX_OK)
 		goto tx_err;
 
@@ -384,7 +527,7 @@ nsh_newlink (struct net * net, struct net_device * dev,
 	 * creation. so, newlink only does register_netdevice. */
 
 	int err;
-	struct nsh_net * nnet = net_generic (net, nshkmod_net_id);
+	struct nsh_net * nnet = net_generic (net, nsh_net_id);
 	struct nsh_dev * ndev = netdev_priv (dev);
 
 	err = register_netdevice (dev);
@@ -403,7 +546,7 @@ nsh_dellink (struct net_device * dev, struct list_head * head)
 {
 	unsigned int n;
 	struct nsh_dev * ndev = netdev_priv (dev);
-	struct nsh_net * nnet = net_generic (dev_net (dev), nshkmod_net_id);
+	struct nsh_net * nnet = net_generic (dev_net (dev), nsh_net_id);
 
 	/* remove this device from nsh table */
 	for (n = 0; n < NSH_HASH_SIZE; n++) {
@@ -466,7 +609,7 @@ static __net_init int
 nshkmod_init_net (struct net * net)
 {
 	unsigned int n;
-	struct nsh_net * nnet = net_generic (net, nshkmod_net_id);
+	struct nsh_net * nnet = net_generic (net, nsh_net_id);
 		
 	for (n = 0; n < NSH_HASH_SIZE; n++)
 		INIT_HLIST_HEAD (&nnet->nsh_table[n]);
@@ -486,7 +629,7 @@ nshkmod_init_net (struct net * net)
 static void __net_exit
 nshkmod_exit_net (struct net * net)
 {
-	struct nsh_net * nnet = net_generic (net, nshkmod_net_id);
+	struct nsh_net * nnet = net_generic (net, nsh_net_id);
 	struct nsh_dev * ndev, * next;
 	struct net_device * dev, * aux;
 	LIST_HEAD (list);
@@ -512,7 +655,7 @@ nshkmod_exit_net (struct net * net)
 static struct pernet_operations nshkmod_net_ops = {
 	.init	= nshkmod_init_net,
 	.exit	= nshkmod_exit_net,
-	.id	= &nshkmod_net_id,
+	.id	= &nsh_net_id,
 	.size	= sizeof (struct nsh_net),
 };
 

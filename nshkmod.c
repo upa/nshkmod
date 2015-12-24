@@ -633,6 +633,7 @@ nshkmod_exit_net (struct net * net)
 		if (!net_eq (dev_net (ndev->dev), net))
 			unregister_netdevice_queue (ndev->dev, &list);
 	}
+	unregister_netdevice_many(&list);
 	rtnl_unlock ();
 
 	nsh_destroy_table (nnet);
@@ -703,7 +704,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 			vni = nla_get_u32 (info->attrs[NSHKMOD_ATTR_VNI]);
 		}
 		if (encap_type != NSH_ENCAP_TYPE_VXLAN) {
-			pr_debug ("version %s only support VXLAN-GPE\n",
+			pr_debug ("version %s only supports VXLAN-GPE\n",
 				  NSHKMOD_VERSION);
 			return -EINVAL;
 		}
@@ -1059,6 +1060,7 @@ nshkmod_exit_module (void)
 {
 	rtnl_link_unregister (&nshkmod_link_ops);
 	unregister_pernet_subsys (&nshkmod_net_ops);
+	genl_unregister_family (&nshkmod_nl_family);
 
 	printk (KERN_INFO PRNSH "nsh kmod version %s unloaded\n",
 		NSHKMOD_VERSION);

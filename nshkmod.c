@@ -840,14 +840,144 @@ nsh_nl_cmd_dev_path_unset (struct sk_buff * skb, struct genl_info * info)
 }
 
 static int
+nsh_nl_table_send (struct sk_buff * skb, u32 portid, u32 seq, int flags,
+		   struct nsh_table * nt)
+{
+	void * hdr;
+	__u8 si;
+	__u32 spi;
+
+	hdr = genlmsg_put (skb, portid, seq, &nshkmod_nl_family, flags,
+			   NSHKMOD_CMD_PATH_DUMP);
+	if (!hdr)
+		return -EMSGSIZE;
+
+	spi = ntohl (nt->key) >> 8;
+	si = (ntohl (nt->key) | 0x000000FF);
+
+	if (nla_put_u32 (skb, NSHKMOD_ATTR_SPI, spi) ||
+	    nla_put_u8 (skb, NSHKMOD_ATTR_SI, si))
+		goto nla_put_failure;
+
+	if (nt->rdev) {
+		if (nla_put_u32 (skb, NSHKMOD_ATTR_IFINDEX,
+				 nt->rdev->dev->ifindex))
+			goto nla_put_failure;
+	} else if (nt->rdst) {
+		if (nla_put_be32 (skb, NSHKMOD_ATTR_REMOTE,
+				  nt->rdst->remote_ip) ||
+		    nla_put_be32 (skb, NSHKMOD_ATTR_REMOTE,
+				  nt->rdst->local_ip) ||
+		    nla_put_u32 (skb, NSHKMOD_ATTR_ENCAP,
+				 nt->rdst->encap_type))
+			goto nla_put_failure;
+
+		if (nt->rdst->encap_type == NSH_ENCAP_TYPE_VXLAN) {
+			if (nla_put_u32 (skb, NSHKMOD_ATTR_VNI, nt->rdst->vni))
+				goto nla_put_failure;
+		}
+	}
+
+	return genlmsg_end (skb, hdr);
+
+nla_put_failure:
+	genlmsg_cancel (skb, hdr);
+	return -1;
+}
+
+static int
 nsh_nl_cmd_path_dump (struct sk_buff * skb, struct netlink_callback * cb)
 {
+	/* dump nnet->nsh_table */
+
+	int err, idx, cnt;
+	unsigned int n;
+	struct nsh_net * nnet;
+	struct nsh_table * nt;
+
+	idx = cb->args[0];	/* number of next nsh_table */
+	nnet = net_generic (sock_net (skb->sk), nsh_net_id);
+
+	for (n = 0, cnt = 0; n < NSH_HASH_SIZE; n++) {
+		hlist_for_each_entry_rcu (nt, &nnet->nsh_table[n], hlist) {
+			if (idx > cnt) {
+				cnt++;
+				continue;
+			}
+
+			err = nsh_nl_table_send (skb,
+						 NETLINK_CB (cb->skb).portid,
+						 cb->nlh->nlmsg_seq,
+						 NLM_F_MULTI, nt);
+			if (err < 0)
+				return -1;
+
+			goto out;
+		}
+	}
+
+out:
+	cb->args[0] = cnt + 1;
+
 	return 0;
 }
 
 static int
+nsh_nl_dev_send (struct sk_buff * skb, u32 portid, u32 seq, int flags,
+		   struct nsh_dev * ndev)
+{
+	void * hdr;
+	__u8 si;
+	__u32 spi;
+
+	hdr = genlmsg_put (skb, portid, seq, &nshkmod_nl_family, flags,
+			   NSHKMOD_CMD_DEV_DUMP);
+	if (!hdr)
+		return -EMSGSIZE;
+
+	spi = ntohl (ndev->key) >> 8;
+	si = (ntohl (ndev->key) | 0x000000FF);
+
+	if (nla_put_u32 (skb, NSHKMOD_ATTR_SPI, spi) ||
+	    nla_put_u8 (skb, NSHKMOD_ATTR_SI, si) ||
+	    nla_put_u32 (skb, NSHKMOD_ATTR_IFINDEX, ndev->dev->ifindex))
+		goto nla_put_failure;
+
+	return genlmsg_end (skb, hdr);
+
+nla_put_failure:
+	genlmsg_cancel (skb, hdr);
+	return -1;
+}
+static int
 nsh_nl_cmd_dev_dump (struct sk_buff * skb, struct netlink_callback * cb)
 {
+	/* dump devices and their spi+si mappings */
+
+	int err, idx, cnt;
+	struct nsh_net * nnet;
+	struct nsh_dev * ndev;
+
+	cnt = 0;
+	idx = cb->args[0];	/* number of next nsh_table */
+	nnet = net_generic (sock_net (skb->sk), nsh_net_id);
+
+	list_for_each_entry_rcu (ndev, &nnet->dev_list, list) {
+		if (idx > cnt) {
+			cnt++;
+			continue;
+		}
+
+		err = nsh_nl_dev_send (skb, NETLINK_CB (cb->skb).portid,
+				       cb->nlh->nlmsg_seq, NLM_F_MULTI, ndev);
+		if (err < 0)
+			return -1;
+
+		break;
+	}
+
+	cb->args[0] = cnt + 1;
+
 	return 0;
 }
 

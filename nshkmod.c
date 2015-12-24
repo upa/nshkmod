@@ -24,6 +24,7 @@
 #include <net/rtnetlink.h>
 #include <net/genetlink.h>
 
+#include "nshkmod.h"
 
 /*
  *
@@ -134,13 +135,6 @@ struct nsh_dst {
 	__be32	vni;		/* vni for vxlan encap */
 	__be32	remote_ip;	/* XXX: should support IPv6 */
 	__be32	local_ip;	/* XXX: sould support IPv6 */
-};
-
-enum {
-	NSH_ENCAP_TYPE_VXLAN,
-	NSH_ENCAP_TYPE_ETH,	/* not implemented */
-	NSH_ENCAP_TYPE_GRE,	/* not implemented */
-	NSH_ENCAP_TYPE_GUE	/* not implemented */
 };
 
 /* nsh_table entry. SPI+SI -> Dst (dev or remote) */
@@ -380,7 +374,8 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 
 	nt = nsh_find_table (nnet, ndev->key);
 	if (!nt) {
-		netdev_dbg (dev, "path is not assigned\n");
+		if (net_ratelimit ())
+			netdev_dbg (dev, "path is not assigned\n");
 		goto tx_err;
 	}
 
@@ -655,6 +650,77 @@ static struct pernet_operations nshkmod_net_ops = {
 	.size	= sizeof (struct nsh_net),
 };
 
+
+static struct genl_family nshkmod_nl_family = {
+	.id		= GENL_ID_GENERATE,
+	.name		= NSHKMOD_GENL_NAME,
+	.version	= NSHKMOD_GENL_VERSION,
+	.maxattr	= NSHKMOD_ATTR_MAX,
+	.hdrsize	= 0,
+};
+
+static struct nla_policy nshkmod_nl_policy[NSHKMOD_ATTR_MAX + 1] = {
+	[NSHKMOD_ATTR_IFINDEX]	= { .type = NLA_U32, },
+	[NSHKMOD_ATTR_SPI]	= { .type = NLA_U32, },
+	[NSHKMOD_ATTR_SI]	= { .type = NLA_U8, },
+	[NSHKMOD_ATTR_ENCAP]	= { .type = NLA_U8, },
+	[NSHKMOD_ATTR_REMOTE]	= { .type = NLA_U32, },
+	[NSHKMOD_ATTR_VNI]	= { .type = NLA_U32, },
+};
+
+static int
+nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
+{
+	/* set a path->remote_ip mapping */
+	return 0;
+}
+
+static int
+nsh_nl_cmd_dev_path_set (struct sk_buff * skb, struct genl_info * info)
+{
+	/* set a dev->path mapping */
+	return 0;
+}
+
+static int
+nsh_nl_cmd_path_dump (struct sk_buff * skb, struct netlink_callback * cb)
+{
+	return 0;
+}
+
+static int
+nsh_nl_cmd_dev_dump (struct sk_buff * skb, struct netlink_callback * cb)
+{
+	return 0;
+}
+
+static struct genl_ops nshkmod_nl_ops[] = {
+	{
+		.cmd	= NSHKMOD_CMD_PATH_DST_SET,
+		.doit	= nsh_nl_cmd_path_dst_set,
+		.policy	= nshkmod_nl_policy,
+		//.flags	= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd	= NSHKMOD_CMD_DEV_PATH_SET,
+		.doit	= nsh_nl_cmd_dev_path_set,
+		.policy	= nshkmod_nl_policy,
+		//.flags	= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd	= NSHKMOD_CMD_PATH_DUMP,
+		.dumpit	= nsh_nl_cmd_path_dump,
+		.policy	= nshkmod_nl_policy,
+		//.flags	= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd	= NSHKMOD_CMD_DEV_DUMP,
+		.dumpit	= nsh_nl_cmd_dev_dump,
+		.policy	= nshkmod_nl_policy,
+		//.flags	= GENL_ADMIN_PERM,
+	},
+};
+
 static int __init
 nshkmod_init_module (void)
 {
@@ -670,11 +736,18 @@ nshkmod_init_module (void)
 	if (rc)
 		goto rtnl_failed;
 
+	rc = genl_register_family_with_ops (&nshkmod_nl_family,
+					    nshkmod_nl_ops);
+	if (rc != 0)
+		goto genl_failed;
+
 	printk (KERN_INFO PRNSH "nsh kmod version %s loaded\n",
 		NSHKMOD_VERSION);
 
 	return 0;
 
+genl_failed:
+	rtnl_link_unregister (&nshkmod_link_ops);
 rtnl_failed:
 	unregister_pernet_subsys (&nshkmod_net_ops);
 netns_failed:

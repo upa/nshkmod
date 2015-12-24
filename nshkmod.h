@@ -15,7 +15,8 @@ enum {
 	NSHKMOD_ATTR_SPI,	/* 24bit service path index  */
 	NSHKMOD_ATTR_SI,	/* 8bit service index */
 	NSHKMOD_ATTR_ENCAP,	/* 8bit outer encapsulation type */
-	NSHKMOD_ATTR_REMOTE,	/* 32bit IPv4 address for remote */
+	NSHKMOD_ATTR_REMOTE,	/* 32bit IPv4 address for destination */
+	NSHKMOD_ATTR_LOCAL,	/* 32bit IPv4 address for source */
 	NSHKMOD_ATTR_VNI,	/* 32bit (24bit) VNI for vxlan encap */
 	__NSHKMOD_ATTR_MAX,
 };
@@ -32,7 +33,9 @@ enum {
 /* commands */
 enum {
 	NSHKMOD_CMD_PATH_DST_SET,	/* set dst (ifi or remote) of path */
+	NSHKMOD_CMD_PATH_DST_UNSET,	/* set dst (ifi or remote) of path */
 	NSHKMOD_CMD_DEV_PATH_SET,	/* set dest path of dev */
+	NSHKMOD_CMD_DEV_PATH_UNSET,	/* set dest path of dev */
 	NSHKMOD_CMD_PATH_DUMP,		/* dump path information */
 	NSHKMOD_CMD_DEV_DUMP,		/* dump device path info*/
 	__NSHKMOD_CMD_MAX,

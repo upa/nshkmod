@@ -132,9 +132,9 @@ struct nsh_dev {
 /* remote node (next node of the path) infromation */
 struct nsh_dst {
 	__u8	encap_type;
-	__be32	vni;		/* vni for vxlan encap */
 	__be32	remote_ip;	/* XXX: should support IPv6 */
 	__be32	local_ip;	/* XXX: sould support IPv6 */
+	__be32	vni;		/* vni for vxlan encap */
 };
 
 /* nsh_table entry. SPI+SI -> Dst (dev or remote) */
@@ -212,13 +212,6 @@ nsh_add_table (struct nsh_net * nnet, __be32 key, struct nsh_dev * rdev,
 }
 
 static void
-nsh_delete_table (struct nsh_table * nt)
-{
-	hlist_del_rcu (&nt->hlist);
-	kfree_rcu (nt, rcu);
-}
-
-static void
 nsh_free_table (struct rcu_head * head)
 {
 	struct nsh_table * nt = container_of (head, struct nsh_table, rcu);
@@ -228,6 +221,13 @@ nsh_free_table (struct rcu_head * head)
 	kfree (nt);
 
 	return;
+}
+
+static void
+nsh_delete_table (struct nsh_table * nt)
+{
+	hlist_del_rcu (&nt->hlist);
+	call_rcu (&nt->rcu, nsh_free_table);
 }
 
 static void
@@ -242,8 +242,7 @@ nsh_destroy_table (struct nsh_net * nnet)
 			struct nsh_table * nt;
 
 			nt = container_of (ptr, struct nsh_table, hlist);
-			hlist_del_rcu (&nt->hlist);
-			call_rcu (&nt->rcu, nsh_free_table);
+			nsh_delete_table (nt);
 		}
 	}
 
@@ -665,13 +664,114 @@ static struct nla_policy nshkmod_nl_policy[NSHKMOD_ATTR_MAX + 1] = {
 	[NSHKMOD_ATTR_SI]	= { .type = NLA_U8, },
 	[NSHKMOD_ATTR_ENCAP]	= { .type = NLA_U8, },
 	[NSHKMOD_ATTR_REMOTE]	= { .type = NLA_U32, },
+	[NSHKMOD_ATTR_LOCAL]	= { .type = NLA_U32, },
 	[NSHKMOD_ATTR_VNI]	= { .type = NLA_U32, },
 };
 
 static int
 nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 {
-	/* set a path->remote_ip mapping */
+	/* set a path->remote_ip/dev mapping */
+
+	u8 si, encap_type;
+	__u32 spi, ifindex, vni, key;
+	__be32 remote_ip, local_ip;
+
+	if (!info->attrs[NSHKMOD_ATTR_SPI] || !info->attrs[NSHKMOD_ATTR_SI]) {
+		return -EINVAL;
+	}
+	spi = nla_get_u32 (info->attrs[NSHKMOD_ATTR_SPI]);
+	si = nla_get_u8 (info->attrs[NSHKMOD_ATTR_SI]);
+
+	ifindex = 0;
+	remote_ip = 0;
+	local_ip = 0;
+	vni = 0;
+
+	if (info->attrs[NSHKMOD_ATTR_IFINDEX]) {
+		ifindex = nla_get_u32 (info->attrs[NSHKMOD_ATTR_IFINDEX]);
+	} else {
+		if (!info->attrs[NSHKMOD_ATTR_ENCAP] ||
+		    !info->attrs[NSHKMOD_ATTR_REMOTE] ||
+		    !info->attrs[NSHKMOD_ATTR_LOCAL])
+			return -EINVAL;
+
+		encap_type = nla_get_u8 (info->attrs[NSHKMOD_ATTR_ENCAP]);
+		remote_ip = nla_get_be32 (info->attrs[NSHKMOD_ATTR_REMOTE]);
+		local_ip = nla_get_be32 (info->attrs[NSHKMOD_ATTR_LOCAL]);
+		if (info->attrs[NSHKMOD_ATTR_VNI]) {
+			vni = nla_get_u32 (info->attrs[NSHKMOD_ATTR_VNI]);
+		}
+		if (encap_type != NSH_ENCAP_TYPE_VXLAN) {
+			pr_debug ("version %s only support VXLAN-GPE\n",
+				  NSHKMOD_VERSION);
+			return -EINVAL;
+		}
+	}
+
+	key = htonl ((spi << 8) | si);
+
+	if (ifindex) {
+		/* path->device mapping */
+		struct net_device * dev;
+		dev = __dev_get_by_index (sock_net (skb->sk), ifindex);
+		if (!dev) {
+			pr_debug ("device for index %u does not exist\n",
+				  ifindex);
+			return -EINVAL;
+		}
+		if (dev->netdev_ops != &nsh_netdev_ops) {
+			pr_debug ("%s is not nsh interface\n", dev->name);
+			return -EINVAL;
+		}
+
+		nsh_add_table (net_generic (dev_net (dev), nsh_net_id),
+			       key, netdev_priv (dev), NULL);
+	} else {
+		/* path->remote mapping */
+		struct nsh_dst * dst;
+
+		dst = (struct nsh_dst *) kmalloc (sizeof (*dst), GFP_KERNEL);
+		if (!dst) {
+			pr_debug ("no memory to alloc dst entry\n");
+			return -ENOMEM;
+		}
+		dst->encap_type = encap_type;
+		dst->remote_ip = remote_ip;
+		dst->local_ip = local_ip;
+		dst->vni = vni;
+
+		nsh_add_table (net_generic (sock_net (skb->sk), nsh_net_id),
+			       key, NULL, dst);
+	}
+
+	return 0;
+}
+
+static int
+nsh_nl_cmd_path_dst_unset (struct sk_buff * skb, struct genl_info * info)
+{
+	/* unset a path->remote_ip/dev mapping */
+
+	u8 si;
+	__u32 spi, key;
+	struct nsh_table * nt;
+
+	if (!info->attrs[NSHKMOD_ATTR_SPI] || !info->attrs[NSHKMOD_ATTR_SI]) {
+		return -EINVAL;
+	}
+	spi = nla_get_u32 (info->attrs[NSHKMOD_ATTR_SPI]);
+	si = nla_get_u8 (info->attrs[NSHKMOD_ATTR_SI]);
+
+	key = htonl ((spi << 8) | si);
+
+	nt = nsh_find_table (net_generic (sock_net (skb->sk), nsh_net_id),
+			     key);
+	if (!nt)
+		return -ENOENT;
+
+	nsh_delete_table (nt);
+
 	return 0;
 }
 
@@ -679,6 +779,63 @@ static int
 nsh_nl_cmd_dev_path_set (struct sk_buff * skb, struct genl_info * info)
 {
 	/* set a dev->path mapping */
+	u8 si;
+	__u32 ifindex, spi, key;
+	struct net_device * dev;
+	struct nsh_dev * ndev;
+
+	if (!info->attrs[NSHKMOD_ATTR_IFINDEX] ||
+	    !info->attrs[NSHKMOD_ATTR_SPI] || !info->attrs[NSHKMOD_ATTR_SI]) {
+		return -EINVAL;
+	}
+	ifindex = nla_get_u32 (info->attrs[NSHKMOD_ATTR_IFINDEX]);
+	spi = nla_get_u32 (info->attrs[NSHKMOD_ATTR_SPI]);
+	si = nla_get_u8 (info->attrs[NSHKMOD_ATTR_SI]);
+
+	key = htonl ((spi << 8) | 8);
+
+	dev = __dev_get_by_index (sock_net (skb->sk), ifindex);
+	if (!dev) {
+		pr_debug ("device for index %u does not exist\n", ifindex);
+		return -EINVAL;
+	}
+	if (dev->netdev_ops != &nsh_netdev_ops) {
+		pr_debug ("%s is not nsh interface\n", dev->name);
+		return -EINVAL;
+	}
+
+	ndev = netdev_priv (dev);
+	ndev->key = key;
+
+	return 0;
+}
+
+static int
+nsh_nl_cmd_dev_path_unset (struct sk_buff * skb, struct genl_info * info)
+{
+	/* unset a dev->path mapping */
+	__u32 ifindex;
+	struct net_device * dev;
+	struct nsh_dev * ndev;
+
+	if (!info->attrs[NSHKMOD_ATTR_IFINDEX])
+		return -EINVAL;
+
+	ifindex = nla_get_u32 (info->attrs[NSHKMOD_ATTR_IFINDEX]);
+
+	dev = __dev_get_by_index (sock_net (skb->sk), ifindex);
+	if (!dev) {
+		pr_debug ("device for index %u does not exist\n", ifindex);
+		return -EINVAL;
+	}
+	if (dev->netdev_ops != &nsh_netdev_ops) {
+		pr_debug ("%s is not nsh interface\n", dev->name);
+		return -EINVAL;
+	}
+
+	ndev = netdev_priv (dev);
+	ndev->key = 0;
+
 	return 0;
 }
 
@@ -702,8 +859,20 @@ static struct genl_ops nshkmod_nl_ops[] = {
 		//.flags	= GENL_ADMIN_PERM,
 	},
 	{
+		.cmd	= NSHKMOD_CMD_PATH_DST_UNSET,
+		.doit	= nsh_nl_cmd_path_dst_unset,
+		.policy	= nshkmod_nl_policy,
+		//.flags	= GENL_ADMIN_PERM,
+	},
+	{
 		.cmd	= NSHKMOD_CMD_DEV_PATH_SET,
 		.doit	= nsh_nl_cmd_dev_path_set,
+		.policy	= nshkmod_nl_policy,
+		//.flags	= GENL_ADMIN_PERM,
+	},
+	{
+		.cmd	= NSHKMOD_CMD_DEV_PATH_UNSET,
+		.doit	= nsh_nl_cmd_dev_path_unset,
 		.policy	= nshkmod_nl_policy,
 		//.flags	= GENL_ADMIN_PERM,
 	},

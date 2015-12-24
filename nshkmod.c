@@ -126,8 +126,6 @@ struct nsh_dev {
 	struct net_device	* dev;
 
 	__be32	key;	/* SPI+SI. 0 means not assigned  */
-	__be32	spi;	/* service path index */
-	__u8	si;	/* service index */
 };
 
 /* remote node (next node of the path) infromation */
@@ -279,11 +277,7 @@ nsh_recv (struct sk_buff * skb)
 		pr_debug (PRNSH "oam is not supported %#x\n", nbh->flags);
 		return -1;
 	}
-	if (NSH_BASE_OAM (nbh->flags)) {
-		pr_debug (PRNSH "oam is not supported %#x\n", nbh->flags);
-		return -1;
-	}
-	/* XXX: C bit should be considered on software ? */
+	/* XXX: C bit should be considered on software? */
 
 	nt = nsh_find_table (nnet, nph->spisi);
 	if (!nt | !nt->rdev) {
@@ -293,7 +287,10 @@ nsh_recv (struct sk_buff * skb)
 	hdrlen = NSH_BASE_LENGTH (nbh->length) << 2;
 	__skb_pull (skb, hdrlen);
 	skb_reset_mac_header (skb);
+	skb->protocol = eth_type_trans (skb, nt->rdev->dev);
+	skb->encapsulation = 0;
 	skb_reset_network_header (skb);
+
 
 	stats = this_cpu_ptr (nt->rdev->dev->tstats);
 	u64_stats_update_begin (&stats->syncp);
@@ -384,7 +381,7 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 	nt = nsh_find_table (nnet, ndev->key);
 	if (!nt) {
 		netdev_dbg (dev, "path is not assigned\n");
-		return NETDEV_TX_OK;
+		goto tx_err;
 	}
 
 	if (nt->rdev) {
@@ -513,7 +510,6 @@ nsh_setup (struct net_device * dev)
 
 	ndev->dev = dev;
 	ndev->key = 0;
-	ndev->si = 0;
 
 	return;
 }

@@ -48,7 +48,7 @@ static void usage(void)
 "Usage: ip [ OPTIONS ] OBJECT { COMMAND | help }\n"
 "       ip [ -force ] -batch filename\n"
 "where  OBJECT := { link | addr | addrlabel | route | rule | neigh | ntable |\n"
-"                   tunnel | tuntap | maddr | mroute | mrule | monitor | xfrm |\n"
+"                   tunnel | tuntap | nsh | maddr | mroute | mrule | monitor | xfrm |\n"
 "                   netns | l2tp | fou | tcp_metrics | token | netconf }\n"
 "       OPTIONS := { -V[ersion] | -s[tatistics] | -d[etails] | -r[esolve] |\n"
 "                    -h[uman-readable] | -iec |\n"
@@ -86,6 +86,7 @@ static const struct cmd {
 	{ "tunl",	do_iptunnel },
 	{ "tuntap",	do_iptuntap },
 	{ "tap",	do_iptuntap },
+	{ "nsh",	do_ipnsh },
 	{ "token",	do_iptoken },
 	{ "tcpmetrics",	do_tcp_metrics },
 	{ "tcp_metrics",do_tcp_metrics },

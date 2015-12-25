@@ -180,14 +180,119 @@ do_del (int argc, char ** argv)
 }
 
 static int
+dev_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
+{
+	return 0;
+}
+
+static int
 do_show_dev (void)
 {
+	int ret;
+
+	/* show dev->path mappings */
+	GENL_REQUEST (req, 2014, genl_family, 0,
+		      NSHKMOD_GENL_VERSION, NSHKMOD_CMD_DEV_DUMP,
+		      NLM_F_ROOT | NLM_F_MATCH | NLM_F_REQUEST);
+
+	req.n.nlmsg_seq = genl_rth.dump = ++genl_rth.seq;
+
+	if ((ret = rtnl_send (&genl_rth, &req.n, req.n.nlmsg_len)) < 0) {
+		fprintf (stderr, "%s:%d: error\n", __func__, __LINE__);
+		return -2;
+	}
+
+	if (rtnl_dump_filter (&genl_rth, dev_nlmsg, NULL) < 0) {
+		fprintf (stderr, "Dump terminated\n");
+		exit (1);
+	}
+
 	return 0;
 }
 
 static int
 path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 {
+	int len;
+	char remote[16], local[16], encap[16], devname[IF_NAMESIZE];
+	struct genlmsghdr * ghdr;
+	struct rtattr * attrs[NSHKMOD_ATTR_MAX + 1];
+	__u32 spi, ifindex, vni, tmp;
+	__u8 si, encap_type;
+
+	if (n->nlmsg_type == NLMSG_ERROR)
+		return -EBADMSG;
+
+	ghdr = NLMSG_DATA (n);
+	len = n->nlmsg_len - NLMSG_LENGTH (sizeof (*ghdr));
+	if (len < 0)
+		return -1;
+
+	parse_rtattr (attrs, NSHKMOD_ATTR_MAX,
+		      (void *) ghdr + GENL_HDRLEN, len);
+
+	if (!attrs[NSHKMOD_ATTR_SPI] || !attrs[NSHKMOD_ATTR_SI])
+		return -1;
+
+	spi = rta_getattr_u32 (attrs[NSHKMOD_ATTR_SPI]);
+	si = rta_getattr_u8 (attrs[NSHKMOD_ATTR_SI]);
+
+	if (attrs[NSHKMOD_ATTR_IFINDEX]) {
+		/* dst is device */
+		ifindex = rta_getattr_u32 (attrs[NSHKMOD_ATTR_IFINDEX]);
+		if (!if_indextoname (ifindex, devname))
+			return -1;
+
+		fprintf (stdout, "spi %u si %u dev %s", spi, si, devname);
+		return 0;
+	}
+
+	/* dst is remote host */
+	if (attrs[NSHKMOD_ATTR_REMOTE]) {
+		tmp = rta_getattr_u32 (attrs[NSHKMOD_ATTR_REMOTE]);
+		if (!inet_ntop (AF_INET, &tmp, remote, sizeof (remote)))
+			return -1;
+	} else
+		return -1;
+
+	if (attrs[NSHKMOD_ATTR_LOCAL]) {
+		tmp = rta_getattr_u32 (attrs[NSHKMOD_ATTR_LOCAL]);
+		if (!inet_ntop (AF_INET, &tmp, local, sizeof (local)))
+			return -1;
+	} else
+		return -1;
+
+	if (attrs[NSHKMOD_ATTR_ENCAP]) {
+		encap_type = rta_getattr_u8 (attrs[NSHKMOD_ATTR_ENCAP]);
+		switch (encap_type) {
+		case NSH_ENCAP_TYPE_VXLAN :
+			strcpy (encap, "vxlan");
+			break;
+		case NSH_ENCAP_TYPE_ETH :
+			strcpy (encap, "ether");
+			break;
+		case NSH_ENCAP_TYPE_GRE :
+			strcpy (encap, "gre");
+			break;
+		case NSH_ENCAP_TYPE_GUE :
+			strcpy (encap, "gue");
+			break;
+		}
+	} else
+		return -1;
+
+	if (attrs[NSHKMOD_ATTR_VNI])
+		vni = rta_getattr_u32 (attrs[NSHKMOD_ATTR_VNI]);
+	else
+		vni = 0;
+
+	if (vni)
+		fprintf (stdout, "spi %u si %u remote %s local %s encap %s "
+			 "vni %u", spi, si, remote, local, encap, vni);
+	else
+		fprintf (stdout, "spi %u si %u remote %s local %s encap %s",
+			 spi, si, remote, local, encap);
+
 	return 0;
 }
 

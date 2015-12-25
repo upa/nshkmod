@@ -11,6 +11,7 @@
 
 /* attrs */
 enum {
+	NSHKMOD_ATTR_UNSPEC,
 	NSHKMOD_ATTR_IFINDEX,	/* 32bit interface index */
 	NSHKMOD_ATTR_SPI,	/* 24bit service path index  */
 	NSHKMOD_ATTR_SI,	/* 8bit service index */

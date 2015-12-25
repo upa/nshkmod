@@ -50,35 +50,35 @@ parse_args (int argc, char ** argv, struct nsh_param * p)
 			NEXT_ARG ();
 			p->ifindex = if_nametoindex (*argv);
 			if (!p->ifindex) {
-				invarg ("invalid device\n", *argv);
+				invarg ("invalid device", *argv);
 				exit (-1);
 			}
 			p->f_dev++;
 		} else if (strcmp (*argv, "spi") == 0)  {
 			NEXT_ARG ();
 			if (get_u32 (&p->spi, *argv, 0)) {
-				invarg ("invalid spi\n", * argv);
+				invarg ("invalid spi", * argv);
 				exit (-1);
 			}
 			p->f_spisi++;
 		} else if (strcmp (*argv, "si") == 0)  {
 			NEXT_ARG ();
 			if (get_u8 (&p->si, *argv, 0)) {
-				invarg ("invalid si\n", * argv);
+				invarg ("invalid si", * argv);
 				exit (-1);
 			}
 			p->f_spisi++;
 		} else if (strcmp (*argv, "remote") == 0)  {
 			NEXT_ARG ();
 			if (inet_pton (AF_INET, *argv, &p->remote_ip) < 1) {
-				invarg ("invalid remote address\n", *argv);
+				invarg ("invalid remote address", *argv);
 				exit (-1);
 			}
 			p->f_remote++;
 		} else if (strcmp (*argv, "local") == 0)  {
 			NEXT_ARG ();
 			if (inet_pton (AF_INET, *argv, &p->local_ip) < 1) {
-				invarg ("invalid local address\n", *argv);
+				invarg ("invalid local address", *argv);
 				exit (-1);
 			}
 			p->f_remote++;
@@ -87,7 +87,7 @@ parse_args (int argc, char ** argv, struct nsh_param * p)
 			if (strcmp (*argv, "vxlan") == 0)
 				p->encap_type = NSH_ENCAP_TYPE_VXLAN;
 			else {
-				invarg ("invalid encap type\n", *argv);
+				invarg ("invalid encap type", *argv);
 				exit (-1);
 			}
 			p->f_remote++;
@@ -103,15 +103,20 @@ static void
 usage (void)
 {
 	fprintf (stderr,
+		 "usage:  ip nsh { add | del }\n"
+		 "                spi SPI |\n"
+		 "                si SI |\n"
+		 "                { remote REMOTEIP |\n"
+		 "                  local LOCALIP |\n"
+		 "                  encap { vxlan [ vni VNI ] } |\n"
+		 "                dev DEVICE \n"
 		 "\n"
-		 "usage:  ip nsh [ { add | del }\n"
-		 "               [ spi SPI ]\n"
-		 "               [ si SI ]\n"
-		 "              { [ remote REMOTEIP ]\n"
-		 "                [ local LOCALIP ]\n"
-		 "                [ encap { vxlan [ vni VNI ] } ]\n"
-		 "              | [ dev IFNAME ] }\n"
-		 "        ip nsh show [ dev ]"
+		 "        ip nsh { set | unset }\n"
+		 "                dev DEVICE |\n"
+		 "                { spi SPI |\n"
+		 "                  si SI }\n"
+		 "\n"
+		 "        ip nsh show { dev }\n"
 		);
 	exit (-1);
 }
@@ -180,8 +185,91 @@ do_del (int argc, char ** argv)
 }
 
 static int
+do_set (int argc, char ** argv)
+{
+	struct nsh_param p;
+
+	parse_args (argc, argv, &p);
+
+	if (p.f_spisi != 2) {
+		fprintf (stderr, "spi and si must be specified\n");
+		exit (-1);
+	}
+	if (p.ifindex == 0) {
+		fprintf (stderr, "dev must be specified\n");
+		exit (-1);
+	}
+
+	GENL_REQUEST (req, 1024, genl_family, 0, NSHKMOD_GENL_VERSION,
+		      NSHKMOD_CMD_DEV_PATH_SET, NLM_F_REQUEST | NLM_F_ACK);
+
+	addattr32 (&req.n, 1024, NSHKMOD_ATTR_IFINDEX, p.ifindex);
+	addattr32 (&req.n, 1024, NSHKMOD_ATTR_SPI, p.spi);
+	addattr8 (&req.n, 1024, NSHKMOD_ATTR_SI, p.si);
+
+	if (rtnl_talk (&genl_rth, &req.n, 0, 0, NULL) < 0)
+		return -2;
+
+	return 0;
+}
+
+static int
+do_unset (int argc, char ** argv)
+{
+	struct nsh_param p;
+
+	parse_args (argc, argv, &p);
+
+	if (p.ifindex == 0) {
+		fprintf (stderr, "dev must be specified\n");
+		exit (-1);
+	}
+
+	GENL_REQUEST (req, 1024, genl_family, 0, NSHKMOD_GENL_VERSION,
+		      NSHKMOD_CMD_DEV_PATH_UNSET, NLM_F_REQUEST | NLM_F_ACK);
+
+	addattr32 (&req.n, 1024, NSHKMOD_ATTR_IFINDEX, p.ifindex);
+
+	if (rtnl_talk (&genl_rth, &req.n, 0, 0, NULL) < 0)
+		return -2;
+
+	return 0;
+}
+
+static int
 dev_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 {
+	int len;
+	char devname[IF_NAMESIZE];
+	__u8 si;
+	__u32 spi, ifindex;
+	struct genlmsghdr * ghdr;
+	struct rtattr * attrs[NSHKMOD_ATTR_MAX + 1];
+
+	ghdr = NLMSG_DATA (n);
+	len = n->nlmsg_len - NLMSG_LENGTH (sizeof (*ghdr));
+	if (len < 0)
+		return -1;
+
+	parse_rtattr (attrs, NSHKMOD_ATTR_MAX,
+		      (void *) ghdr + GENL_HDRLEN, len);
+
+	if  (!attrs[NSHKMOD_ATTR_SPI] || !attrs[NSHKMOD_ATTR_SI] ||
+	     ! attrs[NSHKMOD_ATTR_IFINDEX])
+		return -1;
+
+	spi = rta_getattr_u32 (attrs[NSHKMOD_ATTR_SPI]);
+	si = rta_getattr_u8 (attrs[NSHKMOD_ATTR_SI]);
+	ifindex = rta_getattr_u32 (attrs[NSHKMOD_ATTR_IFINDEX]);
+
+	if (!if_indextoname (ifindex, devname))
+		return -1;
+
+	if (spi == 0 && si == 0) {
+		fprintf (stdout, "dev %s none\n", devname);
+	} else
+		fprintf (stdout, "dev %s spi %u si %u\n", devname, spi, si);
+
 	return 0;
 }
 
@@ -215,10 +303,10 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 {
 	int len;
 	char remote[16], local[16], encap[16], devname[IF_NAMESIZE];
-	struct genlmsghdr * ghdr;
-	struct rtattr * attrs[NSHKMOD_ATTR_MAX + 1];
 	__u32 spi, ifindex, vni, tmp;
 	__u8 si, encap_type;
+	struct genlmsghdr * ghdr;
+	struct rtattr * attrs[NSHKMOD_ATTR_MAX + 1];
 
 	if (n->nlmsg_type == NLMSG_ERROR)
 		return -EBADMSG;
@@ -243,7 +331,7 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 		if (!if_indextoname (ifindex, devname))
 			return -1;
 
-		fprintf (stdout, "spi %u si %u dev %s", spi, si, devname);
+		fprintf (stdout, "spi %u si %u dev %s\n", spi, si, devname);
 		return 0;
 	}
 
@@ -288,9 +376,9 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 
 	if (vni)
 		fprintf (stdout, "spi %u si %u remote %s local %s encap %s "
-			 "vni %u", spi, si, remote, local, encap, vni);
+			 "vni %u\n", spi, si, remote, local, encap, vni);
 	else
-		fprintf (stdout, "spi %u si %u remote %s local %s encap %s",
+		fprintf (stdout, "spi %u si %u remote %s local %s encap %s\n",
 			 spi, si, remote, local, encap);
 
 	return 0;
@@ -346,6 +434,10 @@ do_ipnsh (int argc, char ** argv)
 		return do_add (argc - 1, argv + 1);
 	if (matches (*argv, "del") == 0 || matches (*argv, "delete") == 0)
 		return do_del (argc - 1, argv + 1);
+	if (matches (*argv, "set") == 0)
+		return do_set (argc - 1, argv + 1);
+	if (matches (*argv, "unset") == 0)
+		return do_unset (argc - 1, argv + 1);
 	if (matches (*argv, "show") == 0 || matches (*argv, "list") == 0)
 		return do_show (argc - 1, argv + 1);
 

@@ -541,10 +541,13 @@ nsh_dellink (struct net_device * dev, struct list_head * head)
 	/* remove this device from nsh table */
 	for (n = 0; n < NSH_HASH_SIZE; n++) {
 		struct nsh_table * nt;		
+		struct hlist_node * ptr, * tmp;
 
-		hlist_for_each_entry_rcu (nt, &nnet->nsh_table[n], hlist) {
-			if (nt->rdev == ndev)
-				nt->rdev = NULL;
+		hlist_for_each_safe (ptr, tmp, &nnet->nsh_table[n]) {
+			nt = container_of (ptr, struct nsh_table, hlist);
+			if (nt->rdev == ndev) {
+				nsh_delete_table (nt);
+			}
 		}
 	}
 	
@@ -677,6 +680,9 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 	u8 si, encap_type;
 	__u32 spi, ifindex, vni, key;
 	__be32 remote_ip, local_ip;
+	struct net * net = sock_net (skb->sk);
+	struct nsh_net * nnet = net_generic (net, nsh_net_id);
+	struct nsh_table * nt;
 
 	if (!info->attrs[NSHKMOD_ATTR_SPI] || !info->attrs[NSHKMOD_ATTR_SI]) {
 		return -EINVAL;
@@ -711,11 +717,14 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 	}
 
 	key = htonl ((spi << 8) | si);
+	nt = nsh_find_table (nnet, key);
+	if (nt)
+		return -EEXIST;
 
 	if (ifindex) {
 		/* path->device mapping */
 		struct net_device * dev;
-		dev = __dev_get_by_index (sock_net (skb->sk), ifindex);
+		dev = __dev_get_by_index (net, ifindex);
 		if (!dev) {
 			pr_debug ("device for index %u does not exist\n",
 				  ifindex);
@@ -726,8 +735,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 			return -EINVAL;
 		}
 
-		nsh_add_table (net_generic (dev_net (dev), nsh_net_id),
-			       key, netdev_priv (dev), NULL);
+		nsh_add_table (nnet, key, netdev_priv (dev), NULL);
 	} else {
 		/* path->remote mapping */
 		struct nsh_dst * dst;
@@ -742,8 +750,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 		dst->local_ip = local_ip;
 		dst->vni = vni;
 
-		nsh_add_table (net_generic (sock_net (skb->sk), nsh_net_id),
-			       key, NULL, dst);
+		nsh_add_table (nnet, key, NULL, dst);
 	}
 
 	return 0;
@@ -787,13 +794,17 @@ nsh_nl_cmd_dev_path_set (struct sk_buff * skb, struct genl_info * info)
 
 	if (!info->attrs[NSHKMOD_ATTR_IFINDEX] ||
 	    !info->attrs[NSHKMOD_ATTR_SPI] || !info->attrs[NSHKMOD_ATTR_SI]) {
+		pr_debug ("ifindex %p, spi %p, si %p\n",
+			  info->attrs[NSHKMOD_ATTR_IFINDEX],
+			  info->attrs[NSHKMOD_ATTR_SPI],
+			  info->attrs[NSHKMOD_ATTR_SI]);
 		return -EINVAL;
 	}
 	ifindex = nla_get_u32 (info->attrs[NSHKMOD_ATTR_IFINDEX]);
 	spi = nla_get_u32 (info->attrs[NSHKMOD_ATTR_SPI]);
 	si = nla_get_u8 (info->attrs[NSHKMOD_ATTR_SI]);
 
-	key = htonl ((spi << 8) | 8);
+	key = htonl ((spi << 8) | si);
 
 	dev = __dev_get_by_index (sock_net (skb->sk), ifindex);
 	if (!dev) {
@@ -854,7 +865,7 @@ nsh_nl_table_send (struct sk_buff * skb, u32 portid, u32 seq, int flags,
 		return -EMSGSIZE;
 
 	spi = ntohl (nt->key) >> 8;
-	si = (ntohl (nt->key) | 0x000000FF);
+	si = (ntohl (nt->key) & 0x000000FF);
 
 	if (nla_put_u32 (skb, NSHKMOD_ATTR_SPI, spi) ||
 	    nla_put_u8 (skb, NSHKMOD_ATTR_SI, si))
@@ -867,7 +878,7 @@ nsh_nl_table_send (struct sk_buff * skb, u32 portid, u32 seq, int flags,
 	} else if (nt->rdst) {
 		if (nla_put_be32 (skb, NSHKMOD_ATTR_REMOTE,
 				  nt->rdst->remote_ip) ||
-		    nla_put_be32 (skb, NSHKMOD_ATTR_REMOTE,
+		    nla_put_be32 (skb, NSHKMOD_ATTR_LOCAL,
 				  nt->rdst->local_ip) ||
 		    nla_put_u32 (skb, NSHKMOD_ATTR_ENCAP,
 				 nt->rdst->encap_type))
@@ -920,7 +931,7 @@ nsh_nl_cmd_path_dump (struct sk_buff * skb, struct netlink_callback * cb)
 out:
 	cb->args[0] = cnt + 1;
 
-	return 0;
+	return skb->len;
 }
 
 static int
@@ -937,7 +948,7 @@ nsh_nl_dev_send (struct sk_buff * skb, u32 portid, u32 seq, int flags,
 		return -EMSGSIZE;
 
 	spi = ntohl (ndev->key) >> 8;
-	si = (ntohl (ndev->key) | 0x000000FF);
+	si = (ntohl (ndev->key) & 0x000000FF);
 
 	if (nla_put_u32 (skb, NSHKMOD_ATTR_SPI, spi) ||
 	    nla_put_u8 (skb, NSHKMOD_ATTR_SI, si) ||
@@ -979,7 +990,7 @@ nsh_nl_cmd_dev_dump (struct sk_buff * skb, struct netlink_callback * cb)
 
 	cb->args[0] = cnt + 1;
 
-	return 0;
+	return skb->len;
 }
 
 static struct genl_ops nshkmod_nl_ops[] = {

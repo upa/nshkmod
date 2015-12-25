@@ -41,7 +41,7 @@
  * |          Service Path ID                      | Service Index |
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  *
- * MD-type 1, four Context Header, 4-byt each.
+ * MD-type 1, four Context Header, 4-byte each.
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  * |                Mandatory Context Header                       |
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -103,7 +103,7 @@ MODULE_DESCRIPTION ("network service header kernel module implementation");
 #define NSH_MDTYPE2_0_HLEN	(sizeof (struct nsh_base_hdr) + \
 				 sizeof (struct nsh_path_hdr))
 
-#define NSH_VXLAN_PORT	60000
+#define NSH_VXLAN_PORT	htons (60000)
 #define NSH_VXLAN_IPV4_HEADROOM	(16 + 8 + 16 + 16) /* UDP+VXLAN+NSH-MD1*/
 #define NSH_VXLAN_TTL	64
 
@@ -250,13 +250,13 @@ nsh_destroy_table (struct nsh_net * nnet)
 }
 
 static int
-nsh_recv (struct sk_buff * skb)
+nsh_recv (struct net * net, struct sk_buff * skb)
 {
 	int hdrlen;
 	struct nsh_base_hdr * nbh;
 	struct nsh_path_hdr * nph;
 	struct nsh_table * nt;
-	struct nsh_net * nnet = net_generic (sock_net (skb->sk), nsh_net_id);
+	struct nsh_net * nnet = net_generic (net, nsh_net_id);
 	struct pcpu_sw_netstats * stats;
 
 	nbh = (struct nsh_base_hdr *) skb->data;
@@ -273,9 +273,8 @@ nsh_recv (struct sk_buff * skb)
 	/* XXX: C bit should be considered on software? */
 
 	nt = nsh_find_table (nnet, nph->spisi);
-	if (!nt | !nt->rdev) {
+	if (!nt || !nt->rdev)
 		return -1;
-	}
 
 	hdrlen = NSH_BASE_LENGTH (nbh->length) << 2;
 	__skb_pull (skb, hdrlen);
@@ -283,7 +282,6 @@ nsh_recv (struct sk_buff * skb)
 	skb->protocol = eth_type_trans (skb, nt->rdev->dev);
 	skb->encapsulation = 0;
 	skb_reset_network_header (skb);
-
 
 	stats = this_cpu_ptr (nt->rdev->dev->tstats);
 	u64_stats_update_begin (&stats->syncp);
@@ -317,7 +315,7 @@ nsh_vxlan_udp_encap_recv (struct sock * sk, struct sk_buff * skb)
 
 	__skb_pull (skb, VXLAN_HLEN);
 
-	return nsh_recv (skb);
+	return nsh_recv (sock_net (sk), skb);
 
 err:
 	return 1;
@@ -364,6 +362,7 @@ static netdev_tx_t
 nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 {
 	int rc;
+	unsigned int len;
 	struct pcpu_sw_netstats * tx_stats;
 	struct nsh_dev * ndev = netdev_priv (dev);
 	struct nsh_net * nnet = net_generic (dev_net (dev), nsh_net_id);
@@ -378,24 +377,6 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 		goto tx_err;
 	}
 
-	if (nt->rdev) {
-		/* nexthop is nsh interface in this machine. */
-		nsh_recv (skb);
-		goto update_stats;
-	}
-
-	if (nt->rdst) {
-		switch (nt->rdst->encap_type) {
-		case NSH_ENCAP_TYPE_VXLAN :
-			rc = nsh_xmit_vxlan (skb, nnet, ndev, nt);
-			break;
-		default :
-			netdev_dbg (dev, "invalid encap type %d\n",
-				    nt->rdst->encap_type);
-			goto tx_err;
-		}
-	}
-
 	/* add NSH MD-TYPE 2 without metadata */
 	rc = skb_cow_head (skb, NSH_MDTYPE2_0_HLEN);
 	if (unlikely (rc)) {
@@ -404,23 +385,42 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 		goto tx_err;
 	}
 
+	nph = (struct nsh_path_hdr *) __skb_push (skb, sizeof (*nph));
+	nph->spisi = ndev->key;
+
 	nbh = (struct nsh_base_hdr *) __skb_push (skb, sizeof (*nbh));
 	nbh->flags	= 0;
 	nbh->length	= NSH_MDTYPE2_0_HLEN >> 2;	/* 4byte word */
 	nbh->mdtype	= NSH_BASE_MDTYPE2;
 	nbh->protocol	= NSH_BASE_PROTO_ETH;
 
-	nph = (struct nsh_path_hdr *) __skb_push (skb, sizeof (*nph));
-	nph->spisi = ndev->key;
+	len = skb->len;
 
-	rc = nsh_xmit_vxlan (skb, nnet, ndev, nt);
-	if (rc != NETDEV_TX_OK)
-		goto tx_err;
+	if (nt->rdev) {
+		/* nexthop is nsh interface in this machine. */
+		nsh_recv (dev_net (dev), skb);
+		goto update_stats;
+	}
+
+	if (nt->rdst) {
+		switch (nt->rdst->encap_type) {
+		case NSH_ENCAP_TYPE_VXLAN :
+			rc = nsh_xmit_vxlan (skb, nnet, ndev, nt);
+			if (rc != NETDEV_TX_OK)
+				goto tx_err;
+			break;
+		default :
+			netdev_dbg (dev, "invalid encap type %d\n",
+				    nt->rdst->encap_type);
+			goto tx_err;
+		}
+	}
 
 update_stats:
+	tx_stats = this_cpu_ptr(dev->tstats);
 	u64_stats_update_begin (&tx_stats->syncp);
 	tx_stats->tx_packets++;
-	tx_stats->tx_bytes += skb->len;
+	tx_stats->tx_bytes += len;
 	u64_stats_update_end (&tx_stats->syncp);
 
 	return NETDEV_TX_OK;
@@ -610,7 +610,7 @@ nshkmod_init_net (struct net * net)
 	INIT_LIST_HEAD (&nnet->dev_list);
 	nnet->net = net;
 
-	nnet->sock = nsh_vxlan_create_sock (net, htons (NSH_VXLAN_PORT));
+	nnet->sock = nsh_vxlan_create_sock (net, NSH_VXLAN_PORT);
 	if (IS_ERR (nnet->sock)) {
 		printk (KERN_ERR PRNSH "failed to add vxlan udp socket\n");
 		return -EINVAL;

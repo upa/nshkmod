@@ -121,19 +121,14 @@ static void
 usage (void)
 {
 	fprintf (stderr,
-		 "usage:  ip nsh { add | del }\n"
-		 "                spi SPI |\n"
-		 "                si SI |\n"
-		 "                mdtype MDTYPE |\n"
-		 "                { remote REMOTEIP |\n"
-		 "                  local LOCALIP |\n"
-		 "                  encap { vxlan [ vni VNI ] } |\n"
-		 "                dev DEVICE \n"
+		 "usage:  ip nsh { add | del } "
+		 "[ spi SPI ] [ si SI ] [ mdtype [ 1 | 2 ] ]\n"
+		 "                { [ remote ADDR ] [ local ADDR ] "
+		 "[ encap vxlan [ vni VNI ] ] |\n"
+		 "                  [ dev DEVICE ]\n"
 		 "\n"
-		 "        ip nsh { set | unset }\n"
-		 "                dev DEVICE |\n"
-		 "                { spi SPI |\n"
-		 "                  si SI }\n"
+		 "        ip nsh { set | unset } "
+		 "[ dev DEVICE ] [ spi SPI ] [ si SI] \n"
 		 "\n"
 		 "        ip nsh show { dev }\n"
 		);
@@ -465,6 +460,10 @@ do_ipnsh (int argc, char ** argv)
 		return do_unset (argc - 1, argv + 1);
 	if (matches (*argv, "show") == 0 || matches (*argv, "list") == 0)
 		return do_show (argc - 1, argv + 1);
+	if (matches (*argv, "help") == 0) {
+		usage ();
+		return -1;
+	}
 
 	fprintf (stderr, "Command \"%s\" is unknown, try \"ip nsh help\".\n",
 		 *argv);

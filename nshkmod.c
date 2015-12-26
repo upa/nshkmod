@@ -547,13 +547,17 @@ static int
 nsh_newlink (struct net * net, struct net_device * dev,
 	     struct nlattr *tb [], struct nlattr * data[])
 {
-	/* XXX: path, destination and device mapping is configured by
-	 * user or orchestrator through generic netlink after link
-	 * creation. so, newlink only does register_netdevice. */
-
 	int err;
+	__u32 spi;
+	__u8 si;
 	struct nsh_net * nnet = net_generic (net, nsh_net_id);
 	struct nsh_dev * ndev = netdev_priv (dev);
+
+	if (data && data[IFLA_NSHKMOD_SPI] && data[IFLA_NSHKMOD_SI]) {
+		spi = nla_get_u32 (data[IFLA_NSHKMOD_SPI]);
+		si = nla_get_u8 (data[IFLA_NSHKMOD_SI]);
+		ndev->key = htonl ((spi << 8) | si);
+	}
 
 	err = register_netdevice (dev);
 	if (err) {
@@ -593,13 +597,22 @@ nsh_dellink (struct net_device * dev, struct list_head * head)
 	return;
 }
 
+static size_t
+nsh_get_size (const struct net_device * dev)
+{
+	return nla_total_size (sizeof (__u32)) +	/* IFLA_NSHKMOD_SPI */
+		nla_total_size (sizeof (__u8)) +	/* IFLA_NSHKMOD_SI */
+		0;
+}
+
 static struct rtnl_link_ops nshkmod_link_ops __read_mostly = {
 	.kind		= "nsh",
-	.maxtype	= 0,
+	.maxtype	= IFLA_NSHKMOD_MAX,
 	.priv_size	= sizeof (struct nsh_dev),
 	.setup		= nsh_setup,
 	.newlink	= nsh_newlink,
 	.dellink	= nsh_dellink,
+	.get_size	= nsh_get_size,
 };
 
 static struct socket *

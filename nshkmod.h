@@ -5,6 +5,17 @@
  * generic netlink definition for nshkmod.
  */
 
+/* IFLA parameter */
+enum {
+	IFLA_NSHKMOD_UNSPEC,
+	IFLA_NSHKMOD_SPI,
+	IFLA_NSHKMOD_SI,
+	__IFLA_NSHKMOD_MAX
+};
+#define IFLA_NSHKMOD_MAX (__IFLA_NSHKMOD_MAX - 1)
+
+
+
 #define NSHKMOD_GENL_NAME	"nshkmod"
 #define NSHKMOD_GENL_VERSION	0x01
 

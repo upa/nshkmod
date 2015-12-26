@@ -295,7 +295,7 @@ nsh_recv (struct net * net, struct sk_buff * skb)
 	stats = this_cpu_ptr (nt->rdev->dev->tstats);
 	u64_stats_update_begin (&stats->syncp);
 	stats->rx_packets++;
-	stats->rx_bytes++;
+	stats->rx_bytes += skb->len;
 	u64_stats_update_end (&stats->syncp);
 
 	netif_rx (skb);
@@ -316,7 +316,7 @@ nsh_vxlan_udp_encap_recv (struct sock * sk, struct sk_buff * skb)
 		goto err;
 
 	vxh = (struct vxlanhdr *) (udp_hdr (skb) + 1);
-	if (vxh->vx_flags != (VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH)) {
+	if (vxh->vx_flags != htonl (VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH)) {
 		netdev_dbg (skb->dev, "invalid vxlan flags %#x\n",
 			    ntohl (vxh->vx_flags));
 		goto err;
@@ -391,6 +391,8 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 		goto tx_err;
 	}
 
+	len = skb->len;
+
 	/* add NSH MD-TYPE 2 without metadata */
 	switch (nt->mdtype) {
 	case NSH_BASE_MDTYPE1 :
@@ -428,8 +430,6 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 	nbh->length	= nhlen >> 2;	/* 4byte word */
 	nbh->mdtype	= nt->mdtype;
 	nbh->protocol	= NSH_BASE_PROTO_ETH;
-
-	len = skb->len;
 
 	if (nt->rdev) {
 		/* nexthop is nsh interface in this machine. */

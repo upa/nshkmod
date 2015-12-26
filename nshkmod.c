@@ -276,6 +276,12 @@ nsh_recv (struct net * net, struct sk_buff * skb)
 	}
 	/* XXX: C bit should be considered on software? */
 
+	if (nbh->protocol != NSH_BASE_PROTO_ETH) {
+		pr_debug (PRNSH "only supports ethrenet. protocol is %u.\n",
+			  nbh->protocol);
+		return -1;
+	}
+
 	if ((ntohl (nph->spisi) & 0x000000FF) == 0) {
 		/* service index 0 packet is dropped (draft 4.3) */
 		return -1;
@@ -393,7 +399,6 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 
 	len = skb->len;
 
-	/* add NSH MD-TYPE 2 without metadata */
 	switch (nt->mdtype) {
 	case NSH_BASE_MDTYPE1 :
 		nhlen = NSH_MDTYPE1_HLEN;

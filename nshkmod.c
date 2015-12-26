@@ -103,10 +103,10 @@ MODULE_DESCRIPTION ("network service header kernel module implementation");
 #define NSH_MDTYPE2_0_HLEN	(sizeof (struct nsh_base_hdr) + \
 				 sizeof (struct nsh_path_hdr))
 
-#define NSH_VXLAN_PORT	htons (60000)
 #define NSH_VXLAN_IPV4_HEADROOM	(16 + 8 + 16 + 16) /* UDP+VXLAN+NSH-MD1*/
 #define NSH_VXLAN_TTL	64
 
+#define VXLAN_GPE_PORT	htons (4790)
 #define VXLAN_GPE_FLAGS 0x0C000000	/* set next protocol */
 #define VXLAN_GPE_PROTO_IPV4	0x01
 #define VXLAN_GPE_PROTO_IPV6	0x02
@@ -355,7 +355,7 @@ nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 
 	return udp_tunnel_xmit_skb (nnet->sock, rt, skb, nt->rdst->local_ip,
 				    nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
-				    NSH_VXLAN_PORT, NSH_VXLAN_PORT, nnet->net);
+				    VXLAN_GPE_PORT, VXLAN_GPE_PORT, nnet->net);
 }
 
 static netdev_tx_t
@@ -610,7 +610,7 @@ nshkmod_init_net (struct net * net)
 	INIT_LIST_HEAD (&nnet->dev_list);
 	nnet->net = net;
 
-	nnet->sock = nsh_vxlan_create_sock (net, NSH_VXLAN_PORT);
+	nnet->sock = nsh_vxlan_create_sock (net, VXLAN_GPE_PORT);
 	if (IS_ERR (nnet->sock)) {
 		printk (KERN_ERR PRNSH "failed to add vxlan udp socket\n");
 		return -EINVAL;

@@ -7,8 +7,8 @@ internet draft is https://tools.ietf.org/html/draft-ietf-sfc-nsh-01.
 nshkmod is Linux kernel module. It provides
 * Ehternet over NSH over VXLAN-GPE,
 * _nsh_ type interface: An nsh interface is an entry point to a path.
-* SPI/SI, next-hop, transport mapping table on kernel space.
-* packet encapsulation, decapsulation, and forwarding according to the table.
+* SPI/SI, next-hop, transport mapping table in kernel space.
+* packet encapsulation, decapsulation, tx/rx in kernel space.
 * modified iproute2 package. You can configure the mapping via `ip nsh` command.
 
 It is only tested on Ubuntu 14.04.3 trusty, kernel version 3.19.0-25-generic.

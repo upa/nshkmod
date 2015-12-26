@@ -26,6 +26,7 @@ struct nsh_param {
 	__u32 ifindex;
 	__u32 spi;
 	__u8 si;
+	__u8 mdtype;
 	__u32 remote_ip, local_ip;
 	__u8 encap_type;
 	__u32 vni;
@@ -54,35 +55,45 @@ parse_args (int argc, char ** argv, struct nsh_param * p)
 				exit (-1);
 			}
 			p->f_dev++;
-		} else if (strcmp (*argv, "spi") == 0)  {
+		} else if (strcmp (*argv, "spi") == 0) {
 			NEXT_ARG ();
 			if (get_u32 (&p->spi, *argv, 0)) {
-				invarg ("invalid spi", * argv);
+				invarg ("invalid spi", *argv);
 				exit (-1);
 			}
 			p->f_spisi++;
-		} else if (strcmp (*argv, "si") == 0)  {
+		} else if (strcmp (*argv, "si") == 0) {
 			NEXT_ARG ();
 			if (get_u8 (&p->si, *argv, 0)) {
-				invarg ("invalid si", * argv);
+				invarg ("invalid si", *argv);
 				exit (-1);
 			}
 			p->f_spisi++;
-		} else if (strcmp (*argv, "remote") == 0)  {
+		} else if (strcmp (*argv, "mdtype") == 0) {
+			NEXT_ARG ();
+			if (get_u8 (&p->mdtype, *argv, 0)) {
+				invarg ("invalid mdtype", *argv);
+				exit (-1);
+			}
+			if (p->mdtype != 0x1 && p->mdtype != 0x2) {
+				invarg ("mdtype must be 1 or 2 ", *argv);
+				exit (1);
+			}
+		} else if (strcmp (*argv, "remote") == 0) {
 			NEXT_ARG ();
 			if (inet_pton (AF_INET, *argv, &p->remote_ip) < 1) {
 				invarg ("invalid remote address", *argv);
 				exit (-1);
 			}
 			p->f_remote++;
-		} else if (strcmp (*argv, "local") == 0)  {
+		} else if (strcmp (*argv, "local") == 0) {
 			NEXT_ARG ();
 			if (inet_pton (AF_INET, *argv, &p->local_ip) < 1) {
 				invarg ("invalid local address", *argv);
 				exit (-1);
 			}
 			p->f_remote++;
-		} else if (strcmp (*argv, "encap") == 0)  {
+		} else if (strcmp (*argv, "encap") == 0) {
 			NEXT_ARG ();
 			if (strcmp (*argv, "vxlan") == 0)
 				p->encap_type = NSH_ENCAP_TYPE_VXLAN;
@@ -91,7 +102,14 @@ parse_args (int argc, char ** argv, struct nsh_param * p)
 				exit (-1);
 			}
 			p->f_remote++;
+		} else if (strcmp (*argv, "vni") == 0) {
+			NEXT_ARG ();
+			if (get_u32 (&p->vni, *argv, 0)) {
+				invarg ("invalid vni", *argv);
+				exit (-1);
+			}
 		}
+
 		argc--;
 		argv++;
 	}
@@ -106,6 +124,7 @@ usage (void)
 		 "usage:  ip nsh { add | del }\n"
 		 "                spi SPI |\n"
 		 "                si SI |\n"
+		 "                mdtype MDTYPE |\n"
 		 "                { remote REMOTEIP |\n"
 		 "                  local LOCALIP |\n"
 		 "                  encap { vxlan [ vni VNI ] } |\n"
@@ -136,16 +155,17 @@ do_add (int argc, char ** argv)
 	GENL_REQUEST (req, 1024, genl_family, 0, NSHKMOD_GENL_VERSION,
 		      NSHKMOD_CMD_PATH_DST_SET, NLM_F_REQUEST | NLM_F_ACK);
 
+	addattr32 (&req.n, 1024, NSHKMOD_ATTR_SPI, p.spi);
+	addattr8 (&req.n, 1024, NSHKMOD_ATTR_SI, p.si);
+	if (p.mdtype)
+		addattr8 (&req.n, 1024, NSHKMOD_ATTR_MDTYPE, p.mdtype);
+
 	if (p.f_dev) {
 		/* dst of path is device */
 		addattr32 (&req.n, 1024, NSHKMOD_ATTR_IFINDEX, p.ifindex);
-		addattr32 (&req.n, 1024, NSHKMOD_ATTR_SPI, p.spi);
-		addattr8 (&req.n, 1024, NSHKMOD_ATTR_SI, p.si);
 	} else if (p.f_remote == 3) {
 		/* remote, local and encap_type are specified.
 		 * dst of path is remote host */
-		addattr32 (&req.n, 1024, NSHKMOD_ATTR_SPI, p.spi);
-		addattr8 (&req.n, 1024, NSHKMOD_ATTR_SI, p.si);
 		addattr32 (&req.n, 1024, NSHKMOD_ATTR_REMOTE, p.remote_ip);
 		addattr32 (&req.n, 1024, NSHKMOD_ATTR_LOCAL, p.local_ip);
 		addattr8 (&req.n, 1024, NSHKMOD_ATTR_ENCAP, p.encap_type);
@@ -304,7 +324,7 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 	int len;
 	char remote[16], local[16], encap[16], devname[IF_NAMESIZE];
 	__u32 spi, ifindex, vni, tmp;
-	__u8 si, encap_type;
+	__u8 si, mdtype, encap_type;
 	struct genlmsghdr * ghdr;
 	struct rtattr * attrs[NSHKMOD_ATTR_MAX + 1];
 
@@ -319,11 +339,13 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 	parse_rtattr (attrs, NSHKMOD_ATTR_MAX,
 		      (void *) ghdr + GENL_HDRLEN, len);
 
-	if (!attrs[NSHKMOD_ATTR_SPI] || !attrs[NSHKMOD_ATTR_SI])
+	if (!attrs[NSHKMOD_ATTR_SPI] || !attrs[NSHKMOD_ATTR_SI] ||
+	    !attrs[NSHKMOD_ATTR_MDTYPE])
 		return -1;
 
 	spi = rta_getattr_u32 (attrs[NSHKMOD_ATTR_SPI]);
 	si = rta_getattr_u8 (attrs[NSHKMOD_ATTR_SI]);
+	mdtype = rta_getattr_u8 (attrs[NSHKMOD_ATTR_MDTYPE]);
 
 	if (attrs[NSHKMOD_ATTR_IFINDEX]) {
 		/* dst is device */
@@ -331,7 +353,8 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 		if (!if_indextoname (ifindex, devname))
 			return -1;
 
-		fprintf (stdout, "spi %u si %u dev %s\n", spi, si, devname);
+		fprintf (stdout, "spi %u si %u mdtype %u dev %s\n",
+			 spi, si, mdtype, devname);
 		return 0;
 	}
 
@@ -375,11 +398,13 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 		vni = 0;
 
 	if (vni)
-		fprintf (stdout, "spi %u si %u remote %s local %s encap %s "
-			 "vni %u\n", spi, si, remote, local, encap, vni);
+		fprintf (stdout, "spi %u si %u mdtype %u "
+			 "remote %s local %s encap %s vni %u\n",
+			 spi, si, mdtype, remote, local, encap, vni);
 	else
-		fprintf (stdout, "spi %u si %u remote %s local %s encap %s\n",
-			 spi, si, remote, local, encap);
+		fprintf (stdout, "spi %u si %u mdtype %u "
+			 "remote %s local %s encap %s\n",
+			 spi, si, mdtype, remote, local, encap);
 
 	return 0;
 }

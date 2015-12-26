@@ -100,10 +100,12 @@ MODULE_DESCRIPTION ("network service header kernel module implementation");
 #define PRNSH	"nshkmod: "
 
 #define VXLAN_HLEN	(sizeof (struct vxlanhdr) + sizeof (struct udphdr))
+#define NSH_MDTYPE1_HLEN	(sizeof (struct nsh_base_hdr) + \
+				 sizeof (struct nsh_path_hdr) + \
+				 sizeof (struct nsh_ctx_type1))
 #define NSH_MDTYPE2_0_HLEN	(sizeof (struct nsh_base_hdr) + \
 				 sizeof (struct nsh_path_hdr))
 
-#define NSH_VXLAN_IPV4_HEADROOM	(16 + 8 + 16 + 16) /* UDP+VXLAN+NSH-MD1*/
 #define NSH_VXLAN_TTL	64
 
 #define VXLAN_GPE_PORT	htons (4790)
@@ -148,6 +150,7 @@ struct nsh_table {
 	__be32	key;	/* SPI+SI */
 	__be32	spi;	/* service path index */
 	__u8	si;	/* service index */
+	__u8	mdtype;	/* MD-type */
 
 	struct nsh_dev	* rdev;
 	struct nsh_dst	* rdst;
@@ -187,8 +190,8 @@ nsh_find_table (struct nsh_net * nnet, __be32 key)
 }
 
 static int
-nsh_add_table (struct nsh_net * nnet, __be32 key, struct nsh_dev * rdev,
-	       struct nsh_dst * rdst)
+nsh_add_table (struct nsh_net * nnet, __be32 key, __u8 mdtype,
+	       struct nsh_dev * rdev, struct nsh_dst * rdst)
 {
 	struct nsh_table * nt;
 
@@ -203,6 +206,7 @@ nsh_add_table (struct nsh_net * nnet, __be32 key, struct nsh_dev * rdev,
 	nt->key = key;
 	nt->spi = key >> 8;
 	nt->si	= key & 0x000000FF;
+	nt->mdtype = mdtype;
 	nt->rdev = rdev;
 	nt->rdst = rdst;	/* which one (rdev or rdst) must be NULL */
 
@@ -271,6 +275,11 @@ nsh_recv (struct net * net, struct sk_buff * skb)
 		return -1;
 	}
 	/* XXX: C bit should be considered on software? */
+
+	if ((ntohl (nph->spisi) & 0x000000FF) == 0) {
+		/* service index 0 packet is dropped (draft 4.3) */
+		return -1;
+	}
 
 	nt = nsh_find_table (nnet, nph->spisi);
 	if (!nt || !nt->rdev)
@@ -343,7 +352,7 @@ nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 		return -NETDEV_TX_OK;
 	}
 
-	err = skb_cow_head (skb, NSH_VXLAN_IPV4_HEADROOM);
+	err = skb_cow_head (skb, VXLAN_HEADROOM);
 	if (unlikely (err)) {
 		kfree_skb (skb);
 		return -NETDEV_TX_OK;
@@ -351,7 +360,7 @@ nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 
 	vxh = (struct vxlanhdr *) __skb_push (skb, sizeof (*vxh));
 	vxh->vx_flags = htonl (VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH);
-	vxh->vx_vni = nt->rdst->vni;
+	vxh->vx_vni = htonl (nt->rdst->vni << 8);
 
 	return udp_tunnel_xmit_skb (nnet->sock, rt, skb, nt->rdst->local_ip,
 				    nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
@@ -362,13 +371,14 @@ static netdev_tx_t
 nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 {
 	int rc;
-	unsigned int len;
+	unsigned int len, nhlen;
 	struct pcpu_sw_netstats * tx_stats;
 	struct nsh_dev * ndev = netdev_priv (dev);
 	struct nsh_net * nnet = net_generic (dev_net (dev), nsh_net_id);
 	struct nsh_table * nt;
 	struct nsh_base_hdr * nbh;
 	struct nsh_path_hdr * nph;
+	struct nsh_ctx_type1 * ctx;
 
 	nt = nsh_find_table (nnet, ndev->key);
 	if (!nt) {
@@ -378,11 +388,32 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 	}
 
 	/* add NSH MD-TYPE 2 without metadata */
-	rc = skb_cow_head (skb, NSH_MDTYPE2_0_HLEN);
+	switch (nt->mdtype) {
+	case NSH_BASE_MDTYPE1 :
+		nhlen = NSH_MDTYPE1_HLEN;
+		break;
+	case NSH_BASE_MDTYPE2 :
+		nhlen = NSH_MDTYPE2_0_HLEN;
+		break;
+	default :
+		printk (KERN_INFO PRNSH "invalid MD-type %u\n",	nt->mdtype);
+		goto tx_err;
+	}
+
+	rc = skb_cow_head (skb, nhlen);
 	if (unlikely (rc)) {
 		netdev_dbg (dev, "failed to skb_cow_head\n");
 		kfree_skb (skb);
 		goto tx_err;
+	}
+
+	if (nt->mdtype == NSH_BASE_MDTYPE1) {
+		ctx = (struct nsh_ctx_type1 *) __skb_push (skb, sizeof (*ctx));
+		/* XXX: no metadata. how to implement other drafts? */
+		ctx->ctx[0] = 0;
+		ctx->ctx[1] = 0;
+		ctx->ctx[2] = 0;
+		ctx->ctx[3] = 0;
 	}
 
 	nph = (struct nsh_path_hdr *) __skb_push (skb, sizeof (*nph));
@@ -390,8 +421,8 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 
 	nbh = (struct nsh_base_hdr *) __skb_push (skb, sizeof (*nbh));
 	nbh->flags	= 0;
-	nbh->length	= NSH_MDTYPE2_0_HLEN >> 2;	/* 4byte word */
-	nbh->mdtype	= NSH_BASE_MDTYPE2;
+	nbh->length	= nhlen >> 2;	/* 4byte word */
+	nbh->mdtype	= nt->mdtype;
 	nbh->protocol	= NSH_BASE_PROTO_ETH;
 
 	len = skb->len;
@@ -488,7 +519,7 @@ nsh_setup (struct net_device * dev)
 
 	eth_hw_addr_random (dev);
 	ether_setup (dev);
-	dev->needed_headroom = ETH_HLEN + NSH_VXLAN_IPV4_HEADROOM; /* XXX */
+	dev->needed_headroom = ETH_HLEN + VXLAN_HEADROOM + NSH_MDTYPE1_HLEN;
 
 	dev->netdev_ops = &nsh_netdev_ops;
 	dev->destructor = free_netdev;
@@ -677,7 +708,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 {
 	/* set a path->remote_ip/dev mapping */
 
-	u8 si, encap_type;
+	u8 si, encap_type, mdtype;
 	__u32 spi, ifindex, vni, key;
 	__be32 remote_ip, local_ip;
 	struct net * net = sock_net (skb->sk);
@@ -689,6 +720,10 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 	}
 	spi = nla_get_u32 (info->attrs[NSHKMOD_ATTR_SPI]);
 	si = nla_get_u8 (info->attrs[NSHKMOD_ATTR_SI]);
+
+	mdtype = (info->attrs[NSHKMOD_ATTR_MDTYPE]) ?
+		nla_get_u8 (info->attrs[NSHKMOD_ATTR_MDTYPE]) :
+		NSH_BASE_MDTYPE1;
 
 	ifindex = 0;
 	remote_ip = 0;
@@ -735,7 +770,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 			return -EINVAL;
 		}
 
-		nsh_add_table (nnet, key, netdev_priv (dev), NULL);
+		nsh_add_table (nnet, key, mdtype, netdev_priv (dev), NULL);
 	} else {
 		/* path->remote mapping */
 		struct nsh_dst * dst;
@@ -750,7 +785,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 		dst->local_ip = local_ip;
 		dst->vni = vni;
 
-		nsh_add_table (nnet, key, NULL, dst);
+		nsh_add_table (nnet, key, mdtype, NULL, dst);
 	}
 
 	return 0;
@@ -868,7 +903,8 @@ nsh_nl_table_send (struct sk_buff * skb, u32 portid, u32 seq, int flags,
 	si = (ntohl (nt->key) & 0x000000FF);
 
 	if (nla_put_u32 (skb, NSHKMOD_ATTR_SPI, spi) ||
-	    nla_put_u8 (skb, NSHKMOD_ATTR_SI, si))
+	    nla_put_u8 (skb, NSHKMOD_ATTR_SI, si) ||
+	    nla_put_u8 (skb, NSHKMOD_ATTR_MDTYPE, nt->mdtype))
 		goto nla_put_failure;
 
 	if (nt->rdev) {

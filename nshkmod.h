@@ -15,6 +15,7 @@ enum {
 	NSHKMOD_ATTR_IFINDEX,	/* 32bit interface index */
 	NSHKMOD_ATTR_SPI,	/* 24bit service path index  */
 	NSHKMOD_ATTR_SI,	/* 8bit service index */
+	NSHKMOD_ATTR_MDTYPE,	/* 8bit MD-type */
 	NSHKMOD_ATTR_ENCAP,	/* 8bit outer encapsulation type */
 	NSHKMOD_ATTR_REMOTE,	/* 32bit IPv4 address for destination */
 	NSHKMOD_ATTR_LOCAL,	/* 32bit IPv4 address for source */

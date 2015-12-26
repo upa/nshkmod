@@ -13,6 +13,7 @@ nshkmod is Linux kernel module. It provides
 
 It is only tested on Ubuntu 14.04.3 trusty, kernel version 3.19.0-25-generic.
 
+Note: this is completely experimental implementation.
 
 ## Compile and Install
 
@@ -64,7 +65,7 @@ At first, create nsh interfaces.
 
 	 % ip link add name nsh0 type nsh
 	 % ifconfig nsh0
-	 nsh10     Link encap:Ethernet  HWaddr be:2b:81:fb:34:0d  
+	 nsh0      Link encap:Ethernet  HWaddr be:2b:81:fb:34:0d
 	           BROADCAST MULTICAST  MTU:1500  Metric:1
 	           RX packets:0 errors:0 dropped:0 overruns:0 frame:0
 	           TX packets:0 errors:0 dropped:0 overruns:0 carrier:0

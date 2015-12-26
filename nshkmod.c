@@ -349,22 +349,26 @@ nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 			    (struct in_addr *)&nt->rdst->remote_ip);
 		ndev->dev->stats.tx_carrier_errors++;
 		ndev->dev->stats.tx_dropped++;
-		return -NETDEV_TX_OK;
+		return -1;
 	}
 
 	err = skb_cow_head (skb, VXLAN_HEADROOM);
 	if (unlikely (err)) {
 		kfree_skb (skb);
-		return -NETDEV_TX_OK;
+		return -1;
 	}
 
 	vxh = (struct vxlanhdr *) __skb_push (skb, sizeof (*vxh));
 	vxh->vx_flags = htonl (VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH);
 	vxh->vx_vni = htonl (nt->rdst->vni << 8);
 
-	return udp_tunnel_xmit_skb (nnet->sock, rt, skb, nt->rdst->local_ip,
-				    nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
-				    VXLAN_GPE_PORT, VXLAN_GPE_PORT, nnet->net);
+	err = udp_tunnel_xmit_skb (nnet->sock, rt, skb, nt->rdst->local_ip,
+				   nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
+				   VXLAN_GPE_PORT, VXLAN_GPE_PORT, nnet->net);
+	if (err < 0)
+		return -1;
+
+	return 0;
 }
 
 static netdev_tx_t
@@ -437,7 +441,7 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 		switch (nt->rdst->encap_type) {
 		case NSH_ENCAP_TYPE_VXLAN :
 			rc = nsh_xmit_vxlan (skb, nnet, ndev, nt);
-			if (rc != NETDEV_TX_OK)
+			if (rc < 0)
 				goto tx_err;
 			break;
 		default :

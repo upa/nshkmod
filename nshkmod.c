@@ -116,6 +116,8 @@ MODULE_DESCRIPTION ("network service header kernel module implementation");
 #define VXLAN_GPE_PROTO_NSH	0x04
 #define VXLAN_GPE_PROTO_MPLS	0x05
 
+#define ETH_P_NSH	0x894F	/* Cisco vPath Network Service Header */
+
 
 static int nsh_net_id;
 static u32 nshkmod_salt __read_mostly;
@@ -133,10 +135,17 @@ struct nsh_dev {
 
 /* remote node (next node of the path) infromation */
 struct nsh_dst {
+
 	__u8	encap_type;
+
+	/* vxlan */
 	__be32	remote_ip;	/* XXX: should support IPv6 */
 	__be32	local_ip;	/* XXX: sould support IPv6 */
 	__be32	vni;		/* vni for vxlan encap */
+
+	/* ether */
+	struct net_device * link;
+	__u8	eth_addr[ETH_ALEN];	/* encap ehter */
 };
 
 /* nsh_table entry. SPI+SI -> Dst (dev or remote) */
@@ -378,6 +387,37 @@ nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 }
 
 static netdev_tx_t
+nsh_xmit_ether (struct sk_buff * skb, struct nsh_net * nnet,
+		struct nsh_dev * ndev, struct nsh_table * nt)
+{
+	int err;
+	struct ethhdr * eth;
+	struct nsh_dst * dst;
+
+	err = skb_cow_head (skb, ETH_HLEN);
+	if (unlikely (err)) {
+		kfree_skb (skb);
+		return -1;
+	}
+
+	if (!nt->rdst || !nt->rdst->link) {
+		pr_debug ("%s: invalid link\n", __func__);
+		return -1;
+	}
+	dst = nt->rdst;
+
+	eth = (struct ethhdr *) __skb_push (skb, sizeof (*eth));
+	memcpy (eth->h_dest, dst->eth_addr, ETH_ALEN);
+	memcpy (eth->h_source, dst->link->dev_addr, ETH_ALEN);
+	eth->h_proto = htons (ETH_P_NSH);
+
+	skb->protocol = eth_type_trans (skb, dst->link);
+	skb_reset_mac_header (skb);
+
+	return dst->link->netdev_ops->ndo_start_xmit (skb, dst->link);
+}
+
+static netdev_tx_t
 nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 {
 	int rc;
@@ -446,6 +486,11 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 		switch (nt->rdst->encap_type) {
 		case NSH_ENCAP_TYPE_VXLAN :
 			rc = nsh_xmit_vxlan (skb, nnet, ndev, nt);
+			if (rc < 0)
+				goto tx_err;
+			break;
+		case NSH_ENCAP_TYPE_ETHER :
+			rc = nsh_xmit_ether (skb, nnet, ndev, nt);
 			if (rc < 0)
 				goto tx_err;
 			break;
@@ -620,6 +665,42 @@ static struct rtnl_link_ops nshkmod_link_ops __read_mostly = {
 	.get_size	= nsh_get_size,
 };
 
+
+static int
+nsh_ether_encap_recv (struct sk_buff * skb, struct net_device * dev,
+		      struct packet_type * pt, struct net_device * orig_dev)
+{
+	if (skb->pkt_type == PACKET_OTHERHOST)
+		goto drop;
+
+	if ((skb = skb_share_check (skb, GFP_ATOMIC)) == NULL) {
+		IP_INC_STATS_BH(dev_net(dev), IPSTATS_MIB_INDISCARDS);
+		goto out;
+	}
+
+	if (!pskb_may_pull (skb, ETH_HLEN + NSH_MDTYPE1_HLEN))
+		goto inhdr_error;
+
+	__skb_pull (skb, ETH_HLEN);
+	
+	if (nsh_recv (dev_net (dev), skb) == 0)
+		return 1;
+	else
+		goto out;
+
+inhdr_error:
+	IP_INC_STATS_BH(dev_net(dev), IPSTATS_MIB_INHDRERRORS);
+drop:
+	kfree_skb (skb);
+out:
+	return NET_RX_DROP;
+}
+
+static struct packet_type nshkmod_packet_type __read_mostly = {
+	.type = cpu_to_be16 (ETH_P_NSH),
+	.func = nsh_ether_encap_recv,
+};
+
 static struct socket *
 nsh_vxlan_create_sock (struct net * net, __be16 port)
 {
@@ -723,6 +804,8 @@ static struct nla_policy nshkmod_nl_policy[NSHKMOD_ATTR_MAX + 1] = {
 	[NSHKMOD_ATTR_REMOTE]	= { .type = NLA_U32, },
 	[NSHKMOD_ATTR_LOCAL]	= { .type = NLA_U32, },
 	[NSHKMOD_ATTR_VNI]	= { .type = NLA_U32, },
+	[NSKMOD_ATTR_ETHADDR]	= { .type = NLA_BINALY,
+				    .len = ETH_ALEN },
 };
 
 static int
@@ -730,7 +813,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 {
 	/* set a path->remote_ip/dev mapping */
 
-	u8 si, encap_type, mdtype;
+	u8 si, encap_type, mdtype, eth_addr[ETH_ALEN];
 	__u32 spi, ifindex, vni, key;
 	__be32 remote_ip, local_ip;
 	struct net * net = sock_net (skb->sk);
@@ -751,9 +834,16 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 	remote_ip = 0;
 	local_ip = 0;
 	vni = 0;
+	memset (eth_addr, 0, ETH_ALEN);
 
 	if (info->attrs[NSHKMOD_ATTR_IFINDEX]) {
 		ifindex = nla_get_u32 (info->attrs[NSHKMOD_ATTR_IFINDEX]);
+		if (info->attrs[NSKMOD_ATTR_ETHADDR] &&
+		    info->attrs[NSHKMOD_ATTR_ENCAP]) {
+			nla_memcpy (eth_addr, info->attrs[NSKMOD_ATTR_ETHADDR],
+				    ETH_ALEN);
+			encap_type = nla_get_u8
+		}
 	} else {
 		if (!info->attrs[NSHKMOD_ATTR_ENCAP] ||
 		    !info->attrs[NSHKMOD_ATTR_REMOTE] ||
@@ -778,7 +868,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 	if (nt)
 		return -EEXIST;
 
-	if (ifindex) {
+	if (ifindex & is_zero_ether_addr (eth_addr)) {
 		/* path->device mapping */
 		struct net_device * dev;
 		dev = __dev_get_by_index (net, ifindex);
@@ -793,8 +883,30 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 		}
 
 		nsh_add_table (nnet, key, mdtype, netdev_priv (dev), NULL);
+	} else if (ifindex & !is_zero_ether_addr (eth_addr)) {
+		/* path->ether mapping */
+		struct nsh_dst * dst;
+		struct net_device * dev;
+
+		dev = __dev_get_by_index (net, ifindex);
+		if (!dev) {
+			pr_debug ("link for index %u does not exist\n",
+				  ifindex);
+			return -EINVAL;
+		}
+
+		dst = (struct nsh_dst *) kmalloc (sizeof (*dst), GFP_KERNEL);
+		if (!dst) {
+			pr_debug ("no memory to alloc dst entry\n");
+			return -ENOMEM;
+		}
+		dst_encap_type = encap_type;
+
+		nsh_add_table (nnet, key, mdtype, netdev_priv (dev), NULL);
+
+
 	} else {
-		/* path->remote mapping */
+		/* path->vxlan mapping */
 		struct nsh_dst * dst;
 
 		dst = (struct nsh_dst *) kmalloc (sizeof (*dst), GFP_KERNEL);
@@ -1110,6 +1222,8 @@ nshkmod_init_module (void)
 	if (rc != 0)
 		goto genl_failed;
 
+	dev_add_pack (&nshkmod_packet_type);
+
 	printk (KERN_INFO PRNSH "nsh kmod version %s loaded\n",
 		NSHKMOD_VERSION);
 
@@ -1130,6 +1244,7 @@ nshkmod_exit_module (void)
 	rtnl_link_unregister (&nshkmod_link_ops);
 	unregister_pernet_subsys (&nshkmod_net_ops);
 	genl_unregister_family (&nshkmod_nl_family);
+	dev_remove_pack (&nshkmod_packet_type);
 
 	printk (KERN_INFO PRNSH "nsh kmod version %s unloaded\n",
 		NSHKMOD_VERSION);

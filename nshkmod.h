@@ -31,6 +31,7 @@ enum {
 	NSHKMOD_ATTR_REMOTE,	/* 32bit IPv4 address for destination */
 	NSHKMOD_ATTR_LOCAL,	/* 32bit IPv4 address for source */
 	NSHKMOD_ATTR_VNI,	/* 32bit (24bit) VNI for vxlan encap */
+	NSHKMOD_ATTR_ETHADDR,	/* 48bit destination mac addr */
 	__NSHKMOD_ATTR_MAX,
 };
 #define NSHKMOD_ATTR_MAX (__NSHKMOD_ATTR_MAX)
@@ -38,7 +39,7 @@ enum {
 /* NSHKMOD_ATTR_ENCAP values */
 enum {
 	NSH_ENCAP_TYPE_VXLAN,
-	NSH_ENCAP_TYPE_ETH,	/* not implemented */
+	NSH_ENCAP_TYPE_ETHER,	/* not implemented */
 	NSH_ENCAP_TYPE_GRE,	/* not implemented */
 	NSH_ENCAP_TYPE_GUE	/* not implemented */
 };

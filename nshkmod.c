@@ -214,8 +214,8 @@ nsh_add_table (struct nsh_net * nnet, __be32 key, __u8 mdtype,
 
 	nt->net	= nnet->net;
 	nt->key = key;
-	nt->spi = key >> 8;
-	nt->si	= key & 0x000000FF;
+	nt->spi = ntohl (key) >> 8;
+	nt->si	= ntohl (key) & 0x000000FF;
 	nt->mdtype = mdtype;
 	nt->encap_type = encap_type;
 	nt->rdev = rdev;
@@ -693,6 +693,24 @@ nsh_get_size (const struct net_device * dev)
 		0;
 }
 
+static int
+nsh_fill_info (struct sk_buff * skb, const struct net_device * dev)
+{
+	__u8 si;
+	__u32 spi;
+
+	const struct nsh_dev * ndev = netdev_priv (dev);
+
+	spi = ntohl (ndev->key) >> 8;
+	si = ntohl (ndev->key) & 0x00000FF;
+
+	if (nla_put_u32 (skb, IFLA_NSHKMOD_SPI, spi) ||
+	    nla_put_u8 (skb, IFLA_NSHKMOD_SI, si))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
 static struct rtnl_link_ops nshkmod_link_ops __read_mostly = {
 	.kind		= "nsh",
 	.maxtype	= IFLA_NSHKMOD_MAX,
@@ -701,8 +719,8 @@ static struct rtnl_link_ops nshkmod_link_ops __read_mostly = {
 	.newlink	= nsh_newlink,
 	.dellink	= nsh_dellink,
 	.get_size	= nsh_get_size,
+	.fill_info	= nsh_fill_info,
 };
-
 
 static struct packet_type nshkmod_packet_type __read_mostly = {
 	.type = cpu_to_be16 (ETH_P_NSH),

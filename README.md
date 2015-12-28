@@ -85,7 +85,7 @@ of this interface is not mapped to any service path.
 Map TX to a service path. Then, transmitted packets through nsh0
 interface are encapsulated in network service header with service path
 index 10 and service index 5. Interface TX mapping can also be specified
-on link creation.
+when link creation and validated by `ip -d link show`.
 
 	 % ip nsh set dev nsh0 spi 10 si 5
 	 % ip nsh show dev
@@ -95,6 +95,11 @@ on link creation.
 	 % ip nsh show dev
 	 dev nsh0 spi 10 si 5
 	 dev nsh1 spi 11 si 4
+	 %
+	 % ip -d link show dev nsh1
+	 12: nsh1: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN mode DEFAULT group default
+	     link/ether 86:74:9b:0d:8e:63 brd ff:ff:ff:ff:ff:ff promiscuity 0
+	     nsh spi 11 si 4 addrgenmode eui64
 	 %
 
 

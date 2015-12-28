@@ -63,6 +63,20 @@ nsh_parse_opt (struct link_util * lu, int argc, char ** argv,
 static void
 nsh_print_opt (struct link_util * lu, FILE * f, struct rtattr * tb[])
 {
+	__u32 spi;
+	__u8 si;
+
+	if (!tb)
+		return;
+
+	if (!tb[IFLA_NSHKMOD_SPI] || !tb[IFLA_NSHKMOD_SI])
+		return;
+
+	spi = rta_getattr_u32 (tb[IFLA_NSHKMOD_SPI]);
+	si = rta_getattr_u8 (tb[IFLA_NSHKMOD_SI]);
+
+	fprintf (f, "spi %u si %u ", spi, si);
+
 	return;
 }
 

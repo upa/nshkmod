@@ -38,8 +38,9 @@ enum {
 
 /* NSHKMOD_ATTR_ENCAP values */
 enum {
+	NSH_ENCAP_TYPE_NONE,	/* destination is inner device */
 	NSH_ENCAP_TYPE_VXLAN,
-	NSH_ENCAP_TYPE_ETHER,	/* not implemented */
+	NSH_ENCAP_TYPE_ETHER,
 	NSH_ENCAP_TYPE_GRE,	/* not implemented */
 	NSH_ENCAP_TYPE_GUE	/* not implemented */
 };

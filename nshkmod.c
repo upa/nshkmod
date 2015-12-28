@@ -136,15 +136,13 @@ struct nsh_dev {
 /* remote node (next node of the path) infromation */
 struct nsh_dst {
 
-	__u8	encap_type;
-
 	/* vxlan */
 	__be32	remote_ip;	/* XXX: should support IPv6 */
 	__be32	local_ip;	/* XXX: sould support IPv6 */
 	__be32	vni;		/* vni for vxlan encap */
 
 	/* ether */
-	struct net_device * link;
+	struct net_device * lowerdev;
 	__u8	eth_addr[ETH_ALEN];	/* encap ehter */
 };
 
@@ -160,6 +158,8 @@ struct nsh_table {
 	__be32	spi;	/* service path index */
 	__u8	si;	/* service index */
 	__u8	mdtype;	/* MD-type */
+
+	__u8	encap_type;
 
 	struct nsh_dev	* rdev;
 	struct nsh_dst	* rdst;
@@ -200,7 +200,7 @@ nsh_find_table (struct nsh_net * nnet, __be32 key)
 
 static int
 nsh_add_table (struct nsh_net * nnet, __be32 key, __u8 mdtype,
-	       struct nsh_dev * rdev, struct nsh_dst * rdst)
+	       __u8 encap_type, struct nsh_dev * rdev, struct nsh_dst * rdst)
 {
 	struct nsh_table * nt;
 
@@ -216,6 +216,7 @@ nsh_add_table (struct nsh_net * nnet, __be32 key, __u8 mdtype,
 	nt->spi = key >> 8;
 	nt->si	= key & 0x000000FF;
 	nt->mdtype = mdtype;
+	nt->encap_type = encap_type;
 	nt->rdev = rdev;
 	nt->rdst = rdst;	/* which one (rdev or rdst) must be NULL */
 
@@ -400,7 +401,7 @@ nsh_xmit_ether (struct sk_buff * skb, struct nsh_net * nnet,
 		return -1;
 	}
 
-	if (!nt->rdst || !nt->rdst->link) {
+	if (!nt->rdst || !nt->rdst->lowerdev) {
 		pr_debug ("%s: invalid link\n", __func__);
 		return -1;
 	}
@@ -408,13 +409,14 @@ nsh_xmit_ether (struct sk_buff * skb, struct nsh_net * nnet,
 
 	eth = (struct ethhdr *) __skb_push (skb, sizeof (*eth));
 	memcpy (eth->h_dest, dst->eth_addr, ETH_ALEN);
-	memcpy (eth->h_source, dst->link->dev_addr, ETH_ALEN);
+	memcpy (eth->h_source, dst->lowerdev->dev_addr, ETH_ALEN);
 	eth->h_proto = htons (ETH_P_NSH);
 
-	skb->protocol = eth_type_trans (skb, dst->link);
+	skb->protocol = eth->h_proto;
+	skb->dev = nt->rdst->lowerdev;
 	skb_reset_mac_header (skb);
 
-	return dst->link->netdev_ops->ndo_start_xmit (skb, dst->link);
+	return dev_queue_xmit (skb);
 }
 
 static netdev_tx_t
@@ -483,7 +485,7 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 	}
 
 	if (nt->rdst) {
-		switch (nt->rdst->encap_type) {
+		switch (nt->encap_type) {
 		case NSH_ENCAP_TYPE_VXLAN :
 			rc = nsh_xmit_vxlan (skb, nnet, ndev, nt);
 			if (rc < 0)
@@ -496,7 +498,7 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 			break;
 		default :
 			netdev_dbg (dev, "invalid encap type %d\n",
-				    nt->rdst->encap_type);
+				    nt->encap_type);
 			goto tx_err;
 		}
 	}
@@ -701,6 +703,45 @@ static struct packet_type nshkmod_packet_type __read_mostly = {
 	.func = nsh_ether_encap_recv,
 };
 
+static void
+nsh_handle_lowerdev_unregister (struct nsh_net * nnet, struct net_device * dev)
+{
+	/* check ENCAP_TYPE_ETHER rdst */
+
+	unsigned int n;
+
+	for (n = 0; n < NSH_HASH_SIZE; n++) {
+		struct hlist_node * ptr, * tmp;
+
+		hlist_for_each_safe (ptr, tmp, &nnet->nsh_table[n]) {
+			struct nsh_table * nt;
+
+			nt = container_of (ptr, struct nsh_table, hlist);
+			if (nt->rdst && nt->rdst->lowerdev == dev)
+				nsh_delete_table (nt);
+		}
+	}
+
+	return;
+}
+
+static int
+nsh_lowerdev_event (struct notifier_block * unused,
+		    unsigned long event, void * ptr)
+{
+	struct net_device * dev = netdev_notifier_info_to_dev (ptr);
+	struct nsh_net * nnet = net_generic (dev_net (dev), nsh_net_id);
+
+	if (event == NETDEV_UNREGISTER)
+		nsh_handle_lowerdev_unregister (nnet, dev);
+
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block nshkmod_notifier_block __read_mostly = {
+	.notifier_call = nsh_lowerdev_event,
+};
+
 static struct socket *
 nsh_vxlan_create_sock (struct net * net, __be16 port)
 {
@@ -804,14 +845,14 @@ static struct nla_policy nshkmod_nl_policy[NSHKMOD_ATTR_MAX + 1] = {
 	[NSHKMOD_ATTR_REMOTE]	= { .type = NLA_U32, },
 	[NSHKMOD_ATTR_LOCAL]	= { .type = NLA_U32, },
 	[NSHKMOD_ATTR_VNI]	= { .type = NLA_U32, },
-	[NSKMOD_ATTR_ETHADDR]	= { .type = NLA_BINALY,
+	[NSHKMOD_ATTR_ETHADDR]	= { .type = NLA_BINARY,
 				    .len = ETH_ALEN },
 };
 
 static int
 nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 {
-	/* set a path->remote_ip/dev mapping */
+	/* set a path->remote or device mapping */
 
 	u8 si, encap_type, mdtype, eth_addr[ETH_ALEN];
 	__u32 spi, ifindex, vni, key;
@@ -819,6 +860,8 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 	struct net * net = sock_net (skb->sk);
 	struct nsh_net * nnet = net_generic (net, nsh_net_id);
 	struct nsh_table * nt;
+	struct nsh_dst * dst;
+	struct net_device * dev, * lowerdev;
 
 	if (!info->attrs[NSHKMOD_ATTR_SPI] || !info->attrs[NSHKMOD_ATTR_SI]) {
 		return -EINVAL;
@@ -826,51 +869,33 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 	spi = nla_get_u32 (info->attrs[NSHKMOD_ATTR_SPI]);
 	si = nla_get_u8 (info->attrs[NSHKMOD_ATTR_SI]);
 
+	key = htonl ((spi << 8) | si);
+	nt = nsh_find_table (nnet, key);
+	if (nt)
+		return -EEXIST;
+
 	mdtype = (info->attrs[NSHKMOD_ATTR_MDTYPE]) ?
 		nla_get_u8 (info->attrs[NSHKMOD_ATTR_MDTYPE]) :
 		NSH_BASE_MDTYPE1;
 
+	encap_type = 0;
 	ifindex = 0;
 	remote_ip = 0;
 	local_ip = 0;
 	vni = 0;
 	memset (eth_addr, 0, ETH_ALEN);
 
-	if (info->attrs[NSHKMOD_ATTR_IFINDEX]) {
-		ifindex = nla_get_u32 (info->attrs[NSHKMOD_ATTR_IFINDEX]);
-		if (info->attrs[NSKMOD_ATTR_ETHADDR] &&
-		    info->attrs[NSHKMOD_ATTR_ENCAP]) {
-			nla_memcpy (eth_addr, info->attrs[NSKMOD_ATTR_ETHADDR],
-				    ETH_ALEN);
-			encap_type = nla_get_u8
-		}
-	} else {
-		if (!info->attrs[NSHKMOD_ATTR_ENCAP] ||
-		    !info->attrs[NSHKMOD_ATTR_REMOTE] ||
-		    !info->attrs[NSHKMOD_ATTR_LOCAL])
-			return -EINVAL;
-
+	if (!info->attrs[NSHKMOD_ATTR_ENCAP])
+		encap_type = NSH_ENCAP_TYPE_NONE;
+	else
 		encap_type = nla_get_u8 (info->attrs[NSHKMOD_ATTR_ENCAP]);
-		remote_ip = nla_get_be32 (info->attrs[NSHKMOD_ATTR_REMOTE]);
-		local_ip = nla_get_be32 (info->attrs[NSHKMOD_ATTR_LOCAL]);
-		if (info->attrs[NSHKMOD_ATTR_VNI]) {
-			vni = nla_get_u32 (info->attrs[NSHKMOD_ATTR_VNI]);
-		}
-		if (encap_type != NSH_ENCAP_TYPE_VXLAN) {
-			pr_debug ("version %s only supports VXLAN-GPE\n",
-				  NSHKMOD_VERSION);
+
+	switch (encap_type) {
+	case NSH_ENCAP_TYPE_NONE : /* inner device */
+		if (!info->attrs[NSHKMOD_ATTR_IFINDEX])
 			return -EINVAL;
-		}
-	}
+		ifindex = nla_get_u32 (info->attrs[NSHKMOD_ATTR_IFINDEX]);
 
-	key = htonl ((spi << 8) | si);
-	nt = nsh_find_table (nnet, key);
-	if (nt)
-		return -EEXIST;
-
-	if (ifindex & is_zero_ether_addr (eth_addr)) {
-		/* path->device mapping */
-		struct net_device * dev;
 		dev = __dev_get_by_index (net, ifindex);
 		if (!dev) {
 			pr_debug ("device for index %u does not exist\n",
@@ -882,17 +907,19 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 			return -EINVAL;
 		}
 
-		nsh_add_table (nnet, key, mdtype, netdev_priv (dev), NULL);
-	} else if (ifindex & !is_zero_ether_addr (eth_addr)) {
-		/* path->ether mapping */
-		struct nsh_dst * dst;
-		struct net_device * dev;
+		nsh_add_table (nnet, key, mdtype, encap_type,
+			       netdev_priv (dev), NULL);
+		break;
 
-		dev = __dev_get_by_index (net, ifindex);
-		if (!dev) {
-			pr_debug ("link for index %u does not exist\n",
-				  ifindex);
+	case NSH_ENCAP_TYPE_VXLAN :
+		if (!info->attrs[NSHKMOD_ATTR_ENCAP] ||
+		    !info->attrs[NSHKMOD_ATTR_REMOTE] ||
+		    !info->attrs[NSHKMOD_ATTR_LOCAL])
 			return -EINVAL;
+		remote_ip = nla_get_be32 (info->attrs[NSHKMOD_ATTR_REMOTE]);
+		local_ip = nla_get_be32 (info->attrs[NSHKMOD_ATTR_LOCAL]);
+		if (info->attrs[NSHKMOD_ATTR_VNI]) {
+			vni = nla_get_u32 (info->attrs[NSHKMOD_ATTR_VNI]);
 		}
 
 		dst = (struct nsh_dst *) kmalloc (sizeof (*dst), GFP_KERNEL);
@@ -900,26 +927,41 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 			pr_debug ("no memory to alloc dst entry\n");
 			return -ENOMEM;
 		}
-		dst_encap_type = encap_type;
-
-		nsh_add_table (nnet, key, mdtype, netdev_priv (dev), NULL);
-
-
-	} else {
-		/* path->vxlan mapping */
-		struct nsh_dst * dst;
-
-		dst = (struct nsh_dst *) kmalloc (sizeof (*dst), GFP_KERNEL);
-		if (!dst) {
-			pr_debug ("no memory to alloc dst entry\n");
-			return -ENOMEM;
-		}
-		dst->encap_type = encap_type;
 		dst->remote_ip = remote_ip;
 		dst->local_ip = local_ip;
 		dst->vni = vni;
 
-		nsh_add_table (nnet, key, mdtype, NULL, dst);
+		nsh_add_table (nnet, key, mdtype, encap_type, NULL, dst);
+		break;
+
+	case NSH_ENCAP_TYPE_ETHER :
+		if (!info->attrs[NSHKMOD_ATTR_IFINDEX] ||
+		    !info->attrs[NSHKMOD_ATTR_ETHADDR])
+			return -EINVAL;
+		ifindex = nla_get_u32 (info->attrs[NSHKMOD_ATTR_IFINDEX]);
+		nla_memcpy (eth_addr, info->attrs[NSHKMOD_ATTR_ETHADDR],
+			    ETH_ALEN);
+
+		lowerdev = __dev_get_by_index (net, ifindex);
+		if (!lowerdev) {
+			pr_debug ("ifindex %d does not exist\n", ifindex);
+			return -ENODEV;
+		}
+
+		dst = (struct nsh_dst *) kmalloc (sizeof (*dst), GFP_KERNEL);
+		if (!dst) {
+			pr_debug ("no memory to alloc dst entry\n");
+			return -ENOMEM;
+		}
+		dst->lowerdev = lowerdev;
+		memcpy (dst->eth_addr, eth_addr, ETH_ALEN);
+
+		nsh_add_table (nnet, key, mdtype, encap_type, NULL, dst);
+		break;
+
+	default :
+		/* unsupported encapsulation type */
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1038,27 +1080,33 @@ nsh_nl_table_send (struct sk_buff * skb, u32 portid, u32 seq, int flags,
 
 	if (nla_put_u32 (skb, NSHKMOD_ATTR_SPI, spi) ||
 	    nla_put_u8 (skb, NSHKMOD_ATTR_SI, si) ||
-	    nla_put_u8 (skb, NSHKMOD_ATTR_MDTYPE, nt->mdtype))
+	    nla_put_u8 (skb, NSHKMOD_ATTR_MDTYPE, nt->mdtype) ||
+	    nla_put_u8 (skb, NSHKMOD_ATTR_ENCAP, nt->encap_type))
 		goto nla_put_failure;
 
-	if (nt->rdev) {
+	switch (nt->encap_type) {
+	case NSH_ENCAP_TYPE_NONE :
 		if (nla_put_u32 (skb, NSHKMOD_ATTR_IFINDEX,
 				 nt->rdev->dev->ifindex))
 			goto nla_put_failure;
-	} else if (nt->rdst) {
+		break;
+
+	case NSH_ENCAP_TYPE_VXLAN :
 		if (nla_put_be32 (skb, NSHKMOD_ATTR_REMOTE,
 				  nt->rdst->remote_ip) ||
 		    nla_put_be32 (skb, NSHKMOD_ATTR_LOCAL,
 				  nt->rdst->local_ip) ||
-		    nla_put_u32 (skb, NSHKMOD_ATTR_ENCAP,
-				 nt->rdst->encap_type))
+		    nla_put_u32 (skb, NSHKMOD_ATTR_VNI, nt->rdst->vni))
 			goto nla_put_failure;
-
-		if (nt->rdst->encap_type == NSH_ENCAP_TYPE_VXLAN) {
-			if (nla_put_u32 (skb, NSHKMOD_ATTR_VNI, nt->rdst->vni))
-				goto nla_put_failure;
-		}
+		break;
+	case NSH_ENCAP_TYPE_ETHER :
+		if (nla_put_u32 (skb, NSHKMOD_ATTR_IFINDEX,
+				 nt->rdst->lowerdev->ifindex) ||
+		    nla_put (skb, NSHKMOD_ATTR_ETHADDR, ETH_ALEN,
+			     nt->rdst->eth_addr))
+			goto nla_put_failure;
 	}
+
 
 	return genlmsg_end (skb, hdr);
 
@@ -1213,6 +1261,10 @@ nshkmod_init_module (void)
 	if (rc)
 		goto netns_failed;
 
+	rc = register_netdevice_notifier (&nshkmod_notifier_block);
+	if (rc)
+		goto notify_failed;
+
 	rc = rtnl_link_register (&nshkmod_link_ops);
 	if (rc)
 		goto rtnl_failed;
@@ -1229,9 +1281,12 @@ nshkmod_init_module (void)
 
 	return 0;
 
+
 genl_failed:
 	rtnl_link_unregister (&nshkmod_link_ops);
 rtnl_failed:
+	unregister_netdevice_notifier (&nshkmod_notifier_block);
+notify_failed:
 	unregister_pernet_subsys (&nshkmod_net_ops);
 netns_failed:
 	return rc;
@@ -1242,6 +1297,7 @@ static void __exit
 nshkmod_exit_module (void)
 {
 	rtnl_link_unregister (&nshkmod_link_ops);
+	unregister_netdevice_notifier (&nshkmod_notifier_block);
 	unregister_pernet_subsys (&nshkmod_net_ops);
 	genl_unregister_family (&nshkmod_nl_family);
 	dev_remove_pack (&nshkmod_packet_type);

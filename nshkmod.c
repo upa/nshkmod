@@ -2,10 +2,6 @@
  * NSH kernel module implementation.
  */
 
-#ifndef DEBUG
-#define DEBUG
-#endif
-
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/string.h>
@@ -96,8 +92,6 @@ MODULE_VERSION (NSHKMOD_VERSION);
 MODULE_LICENSE ("GPL");
 MODULE_AUTHOR ("upa@haeena.net");
 MODULE_DESCRIPTION ("network service header kernel module implementation");
-
-#define PRNSH	"nshkmod: "
 
 #define VXLAN_HLEN	(sizeof (struct vxlanhdr) + sizeof (struct udphdr))
 #define NSH_MDTYPE1_HLEN	(sizeof (struct nsh_base_hdr) + \
@@ -207,7 +201,7 @@ nsh_add_table (struct nsh_net * nnet, __be32 key, __u8 mdtype,
 
 	nt = kmalloc (sizeof (*nt), GFP_KERNEL);
 	if (!nt) {
-		pr_debug (PRNSH "%s:fail to alloc memory ", __func__);
+		pr_debug ("%s:fail to alloc memory ", __func__);
 		return -ENOMEM;
 	}
 	memset (nt, 0, sizeof (*nt));
@@ -278,17 +272,17 @@ nsh_recv (struct net * net, struct sk_buff * skb)
 	nph = (struct nsh_path_hdr *) (nbh + 1);
 
 	if (unlikely (!NSH_BASE_CHECK_VERSION (nbh->flags, 0))) {
-		pr_debug (PRNSH "invalid nsh version flag %#x\n", nbh->flags);
+		pr_debug ("invalid nsh version flag %#x\n", nbh->flags);
 		return -1;
 	}
 	if (NSH_BASE_OAM (nbh->flags)) {
-		pr_debug (PRNSH "oam is not supported %#x\n", nbh->flags);
+		pr_debug ("oam is not supported %#x\n", nbh->flags);
 		return -1;
 	}
 	/* XXX: C bit should be considered on software? */
 
 	if (nbh->protocol != NSH_BASE_PROTO_ETH) {
-		pr_debug (PRNSH "only supports ethrenet. protocol is %u.\n",
+		pr_debug ("only supports ethrenet. protocol is %u.\n",
 			  nbh->protocol);
 		return -1;
 	}
@@ -485,7 +479,7 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 		nhlen = NSH_MDTYPE2_0_HLEN;
 		break;
 	default :
-		printk (KERN_INFO PRNSH "invalid MD-type %u\n",	nt->mdtype);
+		pr_debug ("invalid MD-type %u\n", nt->mdtype);
 		goto tx_err;
 	}
 
@@ -649,7 +643,7 @@ nsh_newlink (struct net * net, struct net_device * dev,
 
 	err = register_netdevice (dev);
 	if (err) {
-		printk (KERN_ERR PRNSH "failed to register netdevice\n");
+		printk (KERN_ERR "nsh: failed to register netdevice\n");
 		return err;
 	}
 
@@ -811,7 +805,7 @@ nshkmod_init_net (struct net * net)
 
 	nnet->sock = nsh_vxlan_create_sock (net, VXLAN_GPE_PORT);
 	if (IS_ERR (nnet->sock)) {
-		printk (KERN_ERR PRNSH "failed to add vxlan udp socket\n");
+		printk (KERN_ERR "nshkmod: failed to add vxlan udp socket\n");
 		return -EINVAL;
 	}
 
@@ -1308,11 +1302,10 @@ nshkmod_init_module (void)
 
 	dev_add_pack (&nshkmod_packet_type);
 
-	printk (KERN_INFO PRNSH "nsh kmod version %s loaded\n",
+	printk (KERN_INFO "nsh kmod version %s loaded\n",
 		NSHKMOD_VERSION);
 
 	return 0;
-
 
 genl_failed:
 	rtnl_link_unregister (&nshkmod_link_ops);
@@ -1334,7 +1327,7 @@ nshkmod_exit_module (void)
 	genl_unregister_family (&nshkmod_nl_family);
 	dev_remove_pack (&nshkmod_packet_type);
 
-	printk (KERN_INFO PRNSH "nsh kmod version %s unloaded\n",
+	printk (KERN_INFO "nsh kmod version %s unloaded\n",
 		NSHKMOD_VERSION);
 
 	return;

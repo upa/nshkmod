@@ -21,7 +21,7 @@ compile and install nshkmod.ko
 
 	 % git clone https://github.com/upa/nshkmod.git
 	 % cd nshkmod
-	 % make
+	 % make		# DEBUG=yes for debug mode.
 	 % modprobe udp_tunnel
 	 % insmod ./nshkmod.ko
 

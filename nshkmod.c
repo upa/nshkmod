@@ -306,6 +306,7 @@ nsh_recv (struct net * net, struct sk_buff * skb)
 	skb_reset_mac_header (skb);
 	skb->protocol = eth_type_trans (skb, nt->rdev->dev);
 	skb->encapsulation = 0;
+	skb_scrub_packet (skb, !net_eq (net, dev_net (nt->rdev->dev)));
 	skb_reset_network_header (skb);
 
 	stats = this_cpu_ptr (nt->rdev->dev->tstats);
@@ -370,8 +371,10 @@ nsh_ether_encap_recv (struct sk_buff * skb, struct net_device * dev,
 	else
 		goto out;
 
+/*
 inhdr_error:
 	IP_INC_STATS_BH(dev_net(dev), IPSTATS_MIB_INHDRERRORS);
+*/
 drop:
 	kfree_skb (skb);
 out:

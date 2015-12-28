@@ -5,7 +5,7 @@ nshkmod is a Linux kernel module implementation of Network Service Header.
 internet draft is https://tools.ietf.org/html/draft-ietf-sfc-nsh-01.
 
 * Ehternet over NSH over VXLAN-GPE.
-* Ethernet over NSH over Ethernet (ETHER_TYPE 0x894F)
+* Ethernet over NSH over Ethernet (ETHER_TYPE 0x894F).
 * _nsh_ type interface: An nsh interface is an entry point to a path.
 * SPI/SI, next-hop and transport mapping table in kernel space.
 * packet encapsulation, decapsulation and tx/rx in kernel space.
@@ -126,13 +126,17 @@ To delete mapping table entries, use `ip nsh del` with only `spi` and `si` argum
 
 
 Finaly, interface RX should also be mapped to an other path. Serive path
-is unidirectional.
+is always unidirectional.
 
 	 % ip nsh add spi 12 si 4 dev nsh0
 	 % ip nsh show
 	 spi 12 si 4 mdtype 1 dev nsh0
+	 spi 11 si 4 mdtype 2 encap ether dst 08:01:27:93:f2:a7 link eth2
 	 spi 10 si 5 mdtype 1 remote 10.0.0.2 encap vxlan vni 10
 	 %
+
+Then, NSH packets with spi 12 and si 4 are received by nsh0 interface
+after decapsulation.
 
 [This pull request for tcpdump](https://github.com/the-tcpdump-group/tcpdump/pull/490)
 enables to display NSH over VXLAN-GPE packets.

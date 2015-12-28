@@ -414,7 +414,7 @@ nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 	vxh->vx_flags = htonl (VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH);
 	vxh->vx_vni = htonl (nt->rdst->vni << 8);
 
-	err = udp_tunnel_xmit_skb (nnet->sock, rt, skb, nt->rdst->local_ip,
+	err = udp_tunnel_xmit_skb (nnet->sock, rt, skb, fl4.saddr,
 				   nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
 				   VXLAN_GPE_PORT, VXLAN_GPE_PORT, nnet->net);
 	if (err < 0)
@@ -880,7 +880,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 
 	u8 si, encap_type, mdtype, eth_addr[ETH_ALEN];
 	__u32 spi, ifindex, vni, key;
-	__be32 remote_ip, local_ip;
+	__be32 remote, local;
 	struct net * net = sock_net (skb->sk);
 	struct nsh_net * nnet = net_generic (net, nsh_net_id);
 	struct nsh_table * nt;
@@ -904,8 +904,8 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 
 	encap_type = 0;
 	ifindex = 0;
-	remote_ip = 0;
-	local_ip = 0;
+	remote = 0;
+	local = 0;
 	vni = 0;
 	memset (eth_addr, 0, ETH_ALEN);
 
@@ -937,22 +937,23 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 
 	case NSH_ENCAP_TYPE_VXLAN :
 		if (!info->attrs[NSHKMOD_ATTR_ENCAP] ||
-		    !info->attrs[NSHKMOD_ATTR_REMOTE] ||
-		    !info->attrs[NSHKMOD_ATTR_LOCAL])
+		    !info->attrs[NSHKMOD_ATTR_REMOTE])
 			return -EINVAL;
-		remote_ip = nla_get_be32 (info->attrs[NSHKMOD_ATTR_REMOTE]);
-		local_ip = nla_get_be32 (info->attrs[NSHKMOD_ATTR_LOCAL]);
-		if (info->attrs[NSHKMOD_ATTR_VNI]) {
+		remote = nla_get_be32 (info->attrs[NSHKMOD_ATTR_REMOTE]);
+
+		if (info->attrs[NSHKMOD_ATTR_LOCAL])
+			local = nla_get_be32 (info->attrs[NSHKMOD_ATTR_LOCAL]);
+
+		if (info->attrs[NSHKMOD_ATTR_VNI])
 			vni = nla_get_u32 (info->attrs[NSHKMOD_ATTR_VNI]);
-		}
 
 		dst = (struct nsh_dst *) kmalloc (sizeof (*dst), GFP_KERNEL);
 		if (!dst) {
 			pr_debug ("no memory to alloc dst entry\n");
 			return -ENOMEM;
 		}
-		dst->remote_ip = remote_ip;
-		dst->local_ip = local_ip;
+		dst->remote_ip = remote;
+		dst->local_ip = local;
 		dst->vni = vni;
 
 		nsh_add_table (nnet, key, mdtype, encap_type, NULL, dst);
@@ -1093,6 +1094,7 @@ nsh_nl_table_send (struct sk_buff * skb, u32 portid, u32 seq, int flags,
 	void * hdr;
 	__u8 si;
 	__u32 spi;
+	struct nsh_dst * dst;
 
 	hdr = genlmsg_put (skb, portid, seq, &nshkmod_nl_family, flags,
 			   NSHKMOD_CMD_PATH_DUMP);
@@ -1116,21 +1118,27 @@ nsh_nl_table_send (struct sk_buff * skb, u32 portid, u32 seq, int flags,
 		break;
 
 	case NSH_ENCAP_TYPE_VXLAN :
-		if (nla_put_be32 (skb, NSHKMOD_ATTR_REMOTE,
-				  nt->rdst->remote_ip) ||
-		    nla_put_be32 (skb, NSHKMOD_ATTR_LOCAL,
-				  nt->rdst->local_ip) ||
-		    nla_put_u32 (skb, NSHKMOD_ATTR_VNI, nt->rdst->vni))
+		dst = nt->rdst;
+		if (nla_put_be32 (skb, NSHKMOD_ATTR_REMOTE, dst->remote_ip) ||
+		    nla_put_u32 (skb, NSHKMOD_ATTR_VNI, dst->vni))
 			goto nla_put_failure;
+
+		if (nt->rdst->local_ip) {
+			if (nla_put_be32 (skb, NSHKMOD_ATTR_LOCAL,
+					  dst->local_ip))
+				goto nla_put_failure;
+		}
+
 		break;
+
 	case NSH_ENCAP_TYPE_ETHER :
 		if (nla_put_u32 (skb, NSHKMOD_ATTR_IFINDEX,
 				 nt->rdst->lowerdev->ifindex) ||
 		    nla_put (skb, NSHKMOD_ATTR_ETHADDR, ETH_ALEN,
 			     nt->rdst->eth_addr))
 			goto nla_put_failure;
+		break;
 	}
-
 
 	return genlmsg_end (skb, hdr);
 

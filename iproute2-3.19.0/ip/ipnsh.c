@@ -28,7 +28,7 @@ struct nsh_param {
 	__u32 spi;
 	__u8 si;
 	__u8 mdtype;
-	__u32 remote_ip, local_ip;
+	__u32 remote, local;
 	__u8 encap_type;
 	__u32 vni;
 	__u8 mac[ETH_ALEN];
@@ -37,7 +37,6 @@ struct nsh_param {
 	int f_encap;
 	int f_dev;
 	int f_remote;
-	int f_local;
 	int f_mac;
 	int f_link;
 };
@@ -100,18 +99,17 @@ parse_args (int argc, char ** argv, struct nsh_param * p)
 			p->f_encap++;
 		} else if (strcmp (*argv, "remote") == 0) {
 			NEXT_ARG ();
-			if (inet_pton (AF_INET, *argv, &p->remote_ip) < 1) {
+			if (inet_pton (AF_INET, *argv, &p->remote) < 1) {
 				invarg ("invalid remote address", *argv);
 				exit (-1);
 			}
 			p->f_remote++;
 		} else if (strcmp (*argv, "local") == 0) {
 			NEXT_ARG ();
-			if (inet_pton (AF_INET, *argv, &p->local_ip) < 1) {
+			if (inet_pton (AF_INET, *argv, &p->local) < 1) {
 				invarg ("invalid local address", *argv);
 				exit (-1);
 			}
-			p->f_local++;
 		} else if (strcmp (*argv, "vni") == 0) {
 			NEXT_ARG ();
 			if (get_u32 (&p->vni, *argv, 0)) {
@@ -198,14 +196,16 @@ do_add (int argc, char ** argv)
 		break;
 
 	case NSH_ENCAP_TYPE_VXLAN :
-		if (!p.f_remote || !p.f_local) {
-			fprintf (stderr,
-				 "encap vxlan needs 'remote' and 'local'\n");
+		if (!p.f_remote) {
+			fprintf (stderr, "encap vxlan needs 'remote'\n");
 			exit (-1);
 		}
-		addattr32 (&req.n, 1024, NSHKMOD_ATTR_REMOTE, p.remote_ip);
-		addattr32 (&req.n, 1024, NSHKMOD_ATTR_LOCAL, p.local_ip);
-		addattr32 (&req.n, 1024, NSHKMOD_ATTR_VNI, p.vni);
+		addattr32 (&req.n, 1024, NSHKMOD_ATTR_REMOTE, p.remote);
+
+		if (p.local)
+			addattr32 (&req.n, 1024, NSHKMOD_ATTR_LOCAL, p.local);
+		if (p.vni)
+			addattr32 (&req.n, 1024, NSHKMOD_ATTR_VNI, p.vni);
 		break;
 
 	case NSH_ENCAP_TYPE_ETHER :
@@ -413,16 +413,25 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 		if (!inet_ntop (AF_INET, &tmp, remote, sizeof (remote)))
 			return -1;
 
-		tmp = rta_getattr_u32 (attrs[NSHKMOD_ATTR_LOCAL]);
-		if (!inet_ntop (AF_INET, &tmp, local, sizeof (local)))
-			return -1;
+		if (attrs[NSHKMOD_ATTR_LOCAL]) {
+			tmp = rta_getattr_u32 (attrs[NSHKMOD_ATTR_LOCAL]);
+			if (!inet_ntop (AF_INET, &tmp, local, sizeof (local)))
+				return -1;
+		}
 
 		vni = (attrs[NSHKMOD_ATTR_VNI]) ?
 			rta_getattr_u32 (attrs[NSHKMOD_ATTR_VNI]) : 0;
 
-		fprintf (stdout, "spi %u si %u mdtype %u "
-			 "encap %s remote %s local %s vni %u\n",
-			 spi, si, mdtype, encap, remote, local, vni);
+		if (attrs[NSHKMOD_ATTR_LOCAL]) {
+			fprintf (stdout, "spi %u si %u mdtype %u "
+				 "encap %s remote %s local %s vni %u\n",
+				 spi, si, mdtype, encap, remote, local, vni);
+		} else {
+			fprintf (stdout, "spi %u si %u mdtype %u "
+				 "encap %s remote %s vni %u\n",
+				 spi, si, mdtype, encap, remote, vni);
+		}
+
 		break;
 
 	case NSH_ENCAP_TYPE_ETHER :

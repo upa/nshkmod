@@ -115,11 +115,11 @@ for NSH in the draft. By the way, mdtype and vni can be
 omitted. Default MD-type is 1 and vni is 0. Note that current
 implementation does not consider vxlan VNI value.
 
-	 % ip nsh add spi 10 si 5 encap vxlan remote 10.0.0.2 local 10.0.0.1 vni 10
+	 % ip nsh add spi 10 si 5 encap vxlan remote 10.0.0.2 vni 10
 	 % ip nsh add spi 11 si 4 mdtype 2 encap ether dst 08:00:27:93:f2:a7 link eth2
 	 % ip nsh show
 	 spi 11 si 4 mdtype 2 encap ether dst 08:01:27:93:f2:a7 link eth2
-	 spi 10 si 5 mdtype 1 encap vxlan remote 10.0.0.2 local 10.0.0.1 vni 10
+	 spi 10 si 5 mdtype 1 encap vxlan remote 10.0.0.2 vni 10
 	 %
 
 To delete mapping table entries, use `ip nsh del` with only `spi` and `si` arguments.
@@ -131,7 +131,7 @@ is unidirectional.
 	 % ip nsh add spi 12 si 4 dev nsh0
 	 % ip nsh show
 	 spi 12 si 4 mdtype 1 dev nsh0
-	 spi 10 si 5 mdtype 1 remote 10.0.0.2 local 10.0.0.1 encap vxlan vni 10
+	 spi 10 si 5 mdtype 1 remote 10.0.0.2 encap vxlan vni 10
 	 %
 
 [This pull request for tcpdump](https://github.com/the-tcpdump-group/tcpdump/pull/490)
@@ -172,7 +172,7 @@ a service function is inserted to the path.
 - ip nsh commands at Host 1
   - ip link add name nsh0 type nsh
   - ip nsh set dev nsh0 spi 12 si 6
-  - ip nsh add spi 12 si 6 remote HOST2 local HOST1 encap vxlan
+  - ip nsh add spi 12 si 6 remote HOST2 encap vxlan
   - ip nsh add spi 10 si 5 dev nsh0
 
 - ip nsh commands at Host 2
@@ -180,15 +180,15 @@ a service function is inserted to the path.
   - ip link add name nsh1 type nsh
   - ip nsh set dev nsh0 spi 10 si 5
   - ip nsh set dev nsh1 spi 12 si 5
-  - ip nsh add spi 10 si 5 remote HOST1 local HOST2 encap vxlan
+  - ip nsh add spi 10 si 5 remote HOST1 encap vxlan
   - ip nsh add spi 12 si 6 dev nsh0
-  - ip nsh add spi 12 si 5 remote HOST3 local HOST2 encap vxlan
+  - ip nsh add spi 12 si 5 remote HOST3 encap vxlan
   - ip nsh add spi 10 si 6 dev nsh1
 
 - ip nsh commands at Host 3
   - ip link add name nsh0 type nsh
   - ip link set dev nsh0 spi 10 si 6
-  - ip nsh add spi 10 si 6 remote HOST2 local HOST3 encap vxlan
+  - ip nsh add spi 10 si 6 remote HOST2 encap vxlan
   - ip nsh add spi 12 si 5 dev nsh0
 
 

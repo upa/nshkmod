@@ -346,6 +346,38 @@ err:
 	return 1;
 }
 
+static int
+nsh_ether_encap_recv (struct sk_buff * skb, struct net_device * dev,
+		      struct packet_type * pt, struct net_device * orig_dev)
+{
+	if (skb->pkt_type == PACKET_OTHERHOST)
+		goto drop;
+
+	if ((skb = skb_share_check (skb, GFP_ATOMIC)) == NULL) {
+		IP_INC_STATS_BH(dev_net(dev), IPSTATS_MIB_INDISCARDS);
+		goto out;
+	}
+
+	/* XXX: ???
+	if (!pskb_may_pull (skb, ETH_HLEN))
+		goto inhdr_error;
+
+	__skb_pull (skb, ETH_HLEN);
+	*/
+
+	if (nsh_recv (dev_net (dev), skb) == 0)
+		return 1;
+	else
+		goto out;
+
+inhdr_error:
+	IP_INC_STATS_BH(dev_net(dev), IPSTATS_MIB_INHDRERRORS);
+drop:
+	kfree_skb (skb);
+out:
+	return NET_RX_DROP;
+}
+
 static netdev_tx_t
 nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 		struct nsh_dev * ndev, struct nsh_table * nt)
@@ -667,36 +699,6 @@ static struct rtnl_link_ops nshkmod_link_ops __read_mostly = {
 	.get_size	= nsh_get_size,
 };
 
-
-static int
-nsh_ether_encap_recv (struct sk_buff * skb, struct net_device * dev,
-		      struct packet_type * pt, struct net_device * orig_dev)
-{
-	if (skb->pkt_type == PACKET_OTHERHOST)
-		goto drop;
-
-	if ((skb = skb_share_check (skb, GFP_ATOMIC)) == NULL) {
-		IP_INC_STATS_BH(dev_net(dev), IPSTATS_MIB_INDISCARDS);
-		goto out;
-	}
-
-	if (!pskb_may_pull (skb, ETH_HLEN + NSH_MDTYPE1_HLEN))
-		goto inhdr_error;
-
-	__skb_pull (skb, ETH_HLEN);
-	
-	if (nsh_recv (dev_net (dev), skb) == 0)
-		return 1;
-	else
-		goto out;
-
-inhdr_error:
-	IP_INC_STATS_BH(dev_net(dev), IPSTATS_MIB_INHDRERRORS);
-drop:
-	kfree_skb (skb);
-out:
-	return NET_RX_DROP;
-}
 
 static struct packet_type nshkmod_packet_type __read_mostly = {
 	.type = cpu_to_be16 (ETH_P_NSH),

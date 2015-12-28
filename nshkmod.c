@@ -116,7 +116,8 @@ MODULE_DESCRIPTION ("network service header kernel module implementation");
 #define VXLAN_GPE_PROTO_NSH	0x04
 #define VXLAN_GPE_PROTO_MPLS	0x05
 
-#define ETH_P_NSH	0x894F	/* Cisco vPath Network Service Header */
+#define ETH_P_NSH	0x894F	/* Cisco vPath Network Service Header
+				 * draft-ietf-sfc-nsh-01 sec 9.3 */
 
 
 static int nsh_net_id;

@@ -1,19 +1,19 @@
 
 # nshkmod
 
-nshkmod is an implementation of Network Service Header.
+nshkmod is a Linux kernel module implementation of Network Service Header.
 internet draft is https://tools.ietf.org/html/draft-ietf-sfc-nsh-01.
 
-nshkmod is Linux kernel module. It provides
-* Ehternet over NSH over VXLAN-GPE,
+* Ehternet over NSH over VXLAN-GPE.
+* Ethernet over NSH over Ethernet (ETHER_TYPE 0x894F)
 * _nsh_ type interface: An nsh interface is an entry point to a path.
-* SPI/SI, next-hop, transport mapping table in kernel space.
-* packet encapsulation, decapsulation, tx/rx in kernel space.
+* SPI/SI, next-hop and transport mapping table in kernel space.
+* packet encapsulation, decapsulation and tx/rx in kernel space.
 * modified iproute2 package. You can configure the mapping via `ip nsh` command.
 
 It is only tested on Ubuntu 14.04.3 trusty, kernel version 3.19.0-25-generic.
 
-Note: this is completely experimental implementation.
+Note: this is absolutely experimental implementation.
 
 ## Compile and Install
 
@@ -56,7 +56,7 @@ interface in accordance with the mapping table.
 By abstracting NSH paths as pseudo interfaces that means `struct
 net_device`, existing Linux network stack and its various functions
 can be used for network service chaining (e.g, Linux bridge,
-openvswitch, IP routing, etc).
+openvswitch, openflow and IP routing, etc).
 
 
 ### Configuring nsh via `ip nsh` command
@@ -84,30 +84,43 @@ of this interface is not mapped to any service path.
 
 Map TX to a service path. Then, transmitted packets through nsh0
 interface are encapsulated in network service header with service path
-index 10 and service index 5.
+index 10 and service index 5. Interface TX mapping can also be specified
+on link creation.
 
 	 % ip nsh set dev nsh0 spi 10 si 5
 	 % ip nsh show dev
 	 dev nsh0 spi 10 si 5
+	 %
+	 % ip link add name nsh1 type nsh spi 11 si 4
+	 % ip nsh show dev
+	 dev nsh0 spi 10 si 5
+	 dev nsh1 spi 11 si 4
 	 %
 
 
 Next, add a mapping table entry for the path. Then, transmitted
 packets through nsh0 interface with network service header are
 encapsulated again in VXLAN-GPE and transmitted to a remote host
-10.0.0.2.
+10.0.0.2. Moreover, Ethernet over NSH over Ethernet is supported (vlan
+is not supported).  When NSH is encapsulated in Ethernet header,
+Ethertype is 0x894F. This number is assigned to Cisco vPath Network
+Service Header in [IEEE Ethertype
+assignment](http://standards-oui.ieee.org/ethertype/eth.txt), but used
+for NSH in the draft. By the way, mdtype and vni can be
+omitted. Default MD-type is 1 and vni is 0. Note that current
+implementation does not consider vxlan VNI value.
 
-	 % ip nsh add spi 10 si 5 mdtype 1 remote 10.0.0.2 local 10.0.0.1 encap vxlan vni 10
+	 % ip nsh add spi 10 si 5 encap vxlan remote 10.0.0.2 local 10.0.0.1 vni 10
+	 % ip nsh add spi 11 si 4 mdtype 2 encap ether dst 08:00:27:93:f2:a7 link eth2
 	 % ip nsh show
-	 spi 10 si 5 mdtype 1 remote 10.0.0.2 local 10.0.0.1 encap vxlan vni 10
+	 spi 11 si 4 mdtype 2 encap ether dst 08:01:27:93:f2:a7 link eth2
+	 spi 10 si 5 mdtype 1 encap vxlan remote 10.0.0.2 local 10.0.0.1 vni 10
 	 %
 
-By the way, mdtype and vni can be omitted. Default MD-type is 1 and
-vni is 0. Note that current implementation does not consider vxlan VNI
-value.
+To delete mapping table entries, use `ip nsh del` with only `spi` and `si` arguments.
 
 
-Finaly, interface RX should also mapped to an other path. Serive path
+Finaly, interface RX should also be mapped to an other path. Serive path
 is unidirectional.
 
 	 % ip nsh add spi 12 si 4 dev nsh0
@@ -116,7 +129,8 @@ is unidirectional.
 	 spi 10 si 5 mdtype 1 remote 10.0.0.2 local 10.0.0.1 encap vxlan vni 10
 	 %
 
-[This pull request for tcpdump](https://github.com/the-tcpdump-group/tcpdump/pull/490) enables to display NSH over VXLAN-GPE packets.
+[This pull request for tcpdump](https://github.com/the-tcpdump-group/tcpdump/pull/490)
+enables to display NSH over VXLAN-GPE packets.
 
 ### Configuration example
 

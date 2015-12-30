@@ -376,7 +376,7 @@ out:
 	return NET_RX_DROP;
 }
 
-static netdev_tx_t
+static int
 nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 		struct nsh_dev * ndev, struct nsh_table * nt)
 {
@@ -395,29 +395,25 @@ nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 			    (struct in_addr *)&nt->rdst->remote_ip);
 		ndev->dev->stats.tx_carrier_errors++;
 		ndev->dev->stats.tx_dropped++;
-		return -1;
+		return -ENOENT;
 	}
 
 	err = skb_cow_head (skb, VXLAN_HEADROOM);
 	if (unlikely (err)) {
 		kfree_skb (skb);
-		return -1;
+		return -ENOMEM;
 	}
 
 	vxh = (struct vxlanhdr *) __skb_push (skb, sizeof (*vxh));
 	vxh->vx_flags = htonl (VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH);
 	vxh->vx_vni = htonl (nt->rdst->vni << 8);
 
-	err = udp_tunnel_xmit_skb (nnet->sock, rt, skb, fl4.saddr,
-				   nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
-				   VXLAN_GPE_PORT, VXLAN_GPE_PORT, nnet->net);
-	if (err < 0)
-		return -1;
-
-	return 0;
+	return udp_tunnel_xmit_skb (nnet->sock, rt, skb, fl4.saddr,
+				    nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
+				    VXLAN_GPE_PORT, VXLAN_GPE_PORT, nnet->net);
 }
 
-static netdev_tx_t
+static int
 nsh_xmit_ether (struct sk_buff * skb, struct nsh_net * nnet,
 		struct nsh_dev * ndev, struct nsh_table * nt)
 {
@@ -428,12 +424,12 @@ nsh_xmit_ether (struct sk_buff * skb, struct nsh_net * nnet,
 	err = skb_cow_head (skb, ETH_HLEN);
 	if (unlikely (err)) {
 		kfree_skb (skb);
-		return -1;
+		return -ENOMEM;
 	}
 
 	if (!nt->rdst || !nt->rdst->lowerdev) {
 		pr_debug ("%s: invalid link\n", __func__);
-		return -1;
+		return -ENODEV;
 	}
 	dst = nt->rdst;
 
@@ -563,19 +559,18 @@ static void
 nsh_uninit (struct net_device * dev)
 {
 	free_percpu (dev->tstats);
+	return;
 }
 
 static int
 nsh_open (struct net_device * dev)
 {
-	/* XXX: validation needed? */
 	return 0;
 }
 
 static int
 nsh_stop (struct net_device * dev)
 {
-	/* nothing to be done. */
 	return 0;
 }
 
@@ -918,7 +913,7 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 		if (!dev) {
 			pr_debug ("device for index %u does not exist\n",
 				  ifindex);
-			return -EINVAL;
+			return -ENODEV;
 		}
 		if (dev->netdev_ops != &nsh_netdev_ops) {
 			pr_debug ("%s is not nsh interface\n", dev->name);
@@ -965,6 +960,10 @@ nsh_nl_cmd_path_dst_set (struct sk_buff * skb, struct genl_info * info)
 		if (!lowerdev) {
 			pr_debug ("ifindex %d does not exist\n", ifindex);
 			return -ENODEV;
+		}
+		if (lowerdev->netdev_ops == &nsh_netdev_ops) {
+			pr_debug ("nsh device can't become link of a path\n");
+			return -EINVAL;
 		}
 
 		dst = (struct nsh_dst *) kmalloc (sizeof (*dst), GFP_KERNEL);
@@ -1039,7 +1038,7 @@ nsh_nl_cmd_dev_path_set (struct sk_buff * skb, struct genl_info * info)
 	dev = __dev_get_by_index (sock_net (skb->sk), ifindex);
 	if (!dev) {
 		pr_debug ("device for index %u does not exist\n", ifindex);
-		return -EINVAL;
+		return -ENODEV;
 	}
 	if (dev->netdev_ops != &nsh_netdev_ops) {
 		pr_debug ("%s is not nsh interface\n", dev->name);
@@ -1068,7 +1067,7 @@ nsh_nl_cmd_dev_path_unset (struct sk_buff * skb, struct genl_info * info)
 	dev = __dev_get_by_index (sock_net (skb->sk), ifindex);
 	if (!dev) {
 		pr_debug ("device for index %u does not exist\n", ifindex);
-		return -EINVAL;
+		return -ENODEV;
 	}
 	if (dev->netdev_ops != &nsh_netdev_ops) {
 		pr_debug ("%s is not nsh interface\n", dev->name);
@@ -1242,37 +1241,43 @@ static struct genl_ops nshkmod_nl_ops[] = {
 		.cmd	= NSHKMOD_CMD_PATH_DST_SET,
 		.doit	= nsh_nl_cmd_path_dst_set,
 		.policy	= nshkmod_nl_policy,
-		//.flags	= GENL_ADMIN_PERM,
+#ifndef DEBUG
+		.flags	= GENL_ADMIN_PERM,
+#endif
 	},
 	{
 		.cmd	= NSHKMOD_CMD_PATH_DST_UNSET,
 		.doit	= nsh_nl_cmd_path_dst_unset,
 		.policy	= nshkmod_nl_policy,
-		//.flags	= GENL_ADMIN_PERM,
+#ifndef DEBUG
+		.flags	= GENL_ADMIN_PERM,
+#endif
 	},
 	{
 		.cmd	= NSHKMOD_CMD_DEV_PATH_SET,
 		.doit	= nsh_nl_cmd_dev_path_set,
 		.policy	= nshkmod_nl_policy,
-		//.flags	= GENL_ADMIN_PERM,
+#ifndef DEBUG
+		.flags	= GENL_ADMIN_PERM,
+#endif
 	},
 	{
 		.cmd	= NSHKMOD_CMD_DEV_PATH_UNSET,
 		.doit	= nsh_nl_cmd_dev_path_unset,
 		.policy	= nshkmod_nl_policy,
-		//.flags	= GENL_ADMIN_PERM,
+#ifndef DEBUG
+		.flags	= GENL_ADMIN_PERM,
+#endif
 	},
 	{
 		.cmd	= NSHKMOD_CMD_PATH_DUMP,
 		.dumpit	= nsh_nl_cmd_path_dump,
 		.policy	= nshkmod_nl_policy,
-		//.flags	= GENL_ADMIN_PERM,
 	},
 	{
 		.cmd	= NSHKMOD_CMD_DEV_DUMP,
 		.dumpit	= nsh_nl_cmd_dev_dump,
 		.policy	= nshkmod_nl_policy,
-		//.flags	= GENL_ADMIN_PERM,
 	},
 };
 
@@ -1302,7 +1307,7 @@ nshkmod_init_module (void)
 
 	dev_add_pack (&nshkmod_packet_type);
 
-	printk (KERN_INFO "nsh kmod version %s loaded\n",
+	printk (KERN_INFO "nshkmod version %s loaded\n",
 		NSHKMOD_VERSION);
 
 	return 0;
@@ -1327,7 +1332,7 @@ nshkmod_exit_module (void)
 	genl_unregister_family (&nshkmod_nl_family);
 	dev_remove_pack (&nshkmod_packet_type);
 
-	printk (KERN_INFO "nsh kmod version %s unloaded\n",
+	printk (KERN_INFO "nshkmod version %s unloaded\n",
 		NSHKMOD_VERSION);
 
 	return;

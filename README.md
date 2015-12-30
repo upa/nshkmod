@@ -111,9 +111,7 @@ is not supported).  When NSH is encapsulated in Ethernet header,
 Ethertype is 0x894F. This number is assigned to Cisco vPath Network
 Service Header in [IEEE Ethertype
 assignment](http://standards-oui.ieee.org/ethertype/eth.txt), but used
-for NSH in the draft. By the way, mdtype and vni can be
-omitted. Default MD-type is 1 and vni is 0. Note that current
-implementation does not consider vxlan VNI value.
+for NSH in the draft.
 
 	 % ip nsh add spi 10 si 5 encap vxlan remote 10.0.0.2 vni 10
 	 % ip nsh add spi 11 si 4 mdtype 2 encap ether dst 08:00:27:93:f2:a7 link eth2
@@ -122,7 +120,10 @@ implementation does not consider vxlan VNI value.
 	 spi 10 si 5 mdtype 1 encap vxlan remote 10.0.0.2 vni 10
 	 %
 
-To delete mapping table entries, use `ip nsh del` with only `spi` and `si` arguments.
+By the way, mdtype and vni can be omitted. Default MD-type is 1 and
+vni is 0. Note that current implementation does not consider vxlan VNI
+value. To delete mapping table entries, use `ip nsh del` with only
+`spi` and `si` arguments.
 
 
 Finaly, interface RX should also be mapped to an other path. Serive path
@@ -135,8 +136,9 @@ is always unidirectional.
 	 spi 10 si 5 mdtype 1 remote 10.0.0.2 encap vxlan vni 10
 	 %
 
-Then, NSH packets with spi 12 and si 4 are received by nsh0 interface
-after decapsulation.
+Then, NSH packets with spi 12 and si 4 from networks over VXLAN-GPE or
+Ethernet or intra-host are received by nsh0 interface after
+decapsulation.
 
 [This pull request for tcpdump](https://github.com/the-tcpdump-group/tcpdump/pull/490)
 enables to display NSH over VXLAN-GPE packets.

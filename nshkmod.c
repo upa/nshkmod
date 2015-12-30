@@ -114,6 +114,7 @@ MODULE_ALIAS_RTNL_LINK("nsh");
 #define ETH_P_NSH	0x894F	/* Cisco vPath Network Service Header
 				 * draft-ietf-sfc-nsh-01 sec 9.3 */
 
+#define DEFAULT_MTU	1500
 
 static int nsh_net_id;
 static u32 nshkmod_salt __read_mostly;
@@ -984,6 +985,29 @@ static int nsh_nl_cmd_path_dst_unset(struct sk_buff *skb,
 	return 0;
 }
 
+void nsh_change_mtu_for_path(struct net_device *dev, struct nsh_table *nt)
+{
+	int hlen;
+
+	hlen = (nt->mdtype == NSH_BASE_MDTYPE1) ?
+		NSH_MDTYPE1_HLEN : NSH_MDTYPE2_0_HLEN;
+
+	switch (nt->encap_type) {
+	case NSH_ENCAP_TYPE_VXLAN:
+		hlen += VXLAN_HEADROOM;
+		eth_change_mtu(dev, DEFAULT_MTU - hlen);
+		break;
+
+	case NSH_ENCAP_TYPE_ETHER:
+		hlen += ETH_HLEN;
+		pr_info ("low dev name %s mtu is %d\n",
+			 nt->rdst->lowerdev->name,
+			 nt->rdst->lowerdev->mtu);
+		eth_change_mtu(dev, nt->rdst->lowerdev->mtu - hlen);
+		break;
+	}
+}
+
 static int nsh_nl_cmd_dev_path_set(struct sk_buff *skb,
 				   struct genl_info *info)
 {
@@ -992,6 +1016,7 @@ static int nsh_nl_cmd_dev_path_set(struct sk_buff *skb,
 	__u32 ifindex, spi, key;
 	struct net_device *dev;
 	struct nsh_dev *ndev;
+	struct nsh_table *nt;
 
 	if (!info->attrs[NSHKMOD_ATTR_IFINDEX] ||
 	    !info->attrs[NSHKMOD_ATTR_SPI] || !info->attrs[NSHKMOD_ATTR_SI]) {
@@ -1016,6 +1041,10 @@ static int nsh_nl_cmd_dev_path_set(struct sk_buff *skb,
 		pr_debug("%s is not nsh interface\n", dev->name);
 		return -EINVAL;
 	}
+
+	nt = nsh_find_table(net_generic(dev_net(dev), nsh_net_id), key);
+	if (nt)
+		nsh_change_mtu_for_path(dev, nt);
 
 	ndev = netdev_priv(dev);
 	ndev->key = key;

@@ -1000,9 +1000,6 @@ void nsh_change_mtu_for_path(struct net_device *dev, struct nsh_table *nt)
 
 	case NSH_ENCAP_TYPE_ETHER:
 		hlen += ETH_HLEN;
-		pr_info ("low dev name %s mtu is %d\n",
-			 nt->rdst->lowerdev->name,
-			 nt->rdst->lowerdev->mtu);
 		eth_change_mtu(dev, nt->rdst->lowerdev->mtu - hlen);
 		break;
 	}

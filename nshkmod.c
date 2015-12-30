@@ -125,7 +125,7 @@ struct nsh_dev {
 
 	struct net_device	* dev;
 
-	__be32	key;	/* SPI+SI. 0 means not assigned  */
+	__be32	key;	/* SPI and SI. 0 means not assigned  */
 };
 
 /* remote node (next node of the path) infromation */
@@ -133,7 +133,7 @@ struct nsh_dst {
 
 	/* vxlan */
 	__be32	remote_ip;	/* XXX: should support IPv6 */
-	__be32	local_ip;	/* XXX: sould support IPv6 */
+	__be32	local_ip;	/* XXX: should support IPv6 */
 	__be32	vni;		/* vni for vxlan encap */
 
 	/* ether */
@@ -149,7 +149,7 @@ struct nsh_table {
 	unsigned long		updated;	/* jiffies */
 
 
-	__be32	key;	/* SPI+SI */
+	__be32	key;	/* SPI and SI */
 	__be32	spi;	/* service path index */
 	__u8	si;	/* service index */
 	__u8	mdtype;	/* MD-type */
@@ -378,7 +378,8 @@ out:
 
 static int
 nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
-		struct nsh_dev * ndev, struct nsh_table * nt)
+		struct nsh_dev * ndev, struct nsh_table * nt,
+		__be16 src_port)
 {
 	int err;
 	struct flowi4 fl4;
@@ -410,7 +411,7 @@ nsh_xmit_vxlan (struct sk_buff * skb, struct nsh_net * nnet,
 
 	return udp_tunnel_xmit_skb (nnet->sock, rt, skb, fl4.saddr,
 				    nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
-				    VXLAN_GPE_PORT, VXLAN_GPE_PORT, nnet->net);
+				    src_port, VXLAN_GPE_PORT, nnet->net);
 }
 
 static int
@@ -450,6 +451,7 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 {
 	int rc;
 	unsigned int len, nhlen;
+	__be16 src_port = VXLAN_GPE_PORT;
 	struct pcpu_sw_netstats * tx_stats;
 	struct nsh_dev * ndev = netdev_priv (dev);
 	struct nsh_net * nnet = net_generic (dev_net (dev), nsh_net_id);
@@ -477,6 +479,13 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 	default :
 		pr_debug ("invalid MD-type %u\n", nt->mdtype);
 		goto tx_err;
+	}
+
+	if (nt->encap_type == NSH_ENCAP_TYPE_VXLAN) {
+		/* get udp src port for ether hash before encapsulation.
+		 * XXX: src_port_max and _min should be implemented.
+		 * 0, 0, means default src port range. */
+		src_port = udp_flow_src_port (dev_net (dev), skb, 0, 0, true);
 	}
 
 	rc = skb_cow_head (skb, nhlen);
@@ -513,7 +522,7 @@ nsh_xmit (struct sk_buff * skb, struct net_device * dev)
 	if (nt->rdst) {
 		switch (nt->encap_type) {
 		case NSH_ENCAP_TYPE_VXLAN :
-			rc = nsh_xmit_vxlan (skb, nnet, ndev, nt);
+			rc = nsh_xmit_vxlan (skb, nnet, ndev, nt, src_port);
 			if (rc < 0)
 				goto tx_err;
 			break;

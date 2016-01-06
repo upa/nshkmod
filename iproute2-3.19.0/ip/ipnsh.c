@@ -153,6 +153,7 @@ usage (void)
 		 "                [ local ADDR ]\n"
 		 "                [ vni VNI ]\n"
 		 "                [ dst MACADDR ]\n"
+		 "                [ link DEVICE ]\n"
 		 "\n"
 		 "        ip nsh { set | unset } "
 		 "[ dev DEVICE ] [ spi SPI ] [ si SI] \n"

@@ -146,7 +146,7 @@ usage (void)
 {
 	fprintf (stderr,
 		 "usage:  ip nsh { add | del } "
-		 "[ spi SPI ] [ si SI ] [ mdtype [ 1 | 2 ] ]\n"
+		 "[ spi SPI ] [ si SI ] [ mdtype { 1 | 2 } ]\n"
 		 "                [ encap { none | vxlan | ether } ]\n"
 		 "                [ dev DEVICE ]\n"
 		 "                [ remote ADDR ]\n"

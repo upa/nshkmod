@@ -369,14 +369,37 @@ out:
 	return NET_RX_DROP;
 }
 
+static int nsh_xmit_vxlan_skb(struct socket *sock, struct net * net,
+			      struct rtable *rt, struct sk_buff *skb,
+			      __be32 src, __be32 dst, __be16 src_port,
+			      __be16 dst_port, __be32 vni)
+{
+	int err;
+	struct vxlanhdr *vxh;
+	bool udp_sum = !sock->sk->sk_no_check_tx;
+
+	skb = udp_tunnel_handle_offloads(skb, udp_sum);
+
+	err = skb_cow_head(skb, VXLAN_HEADROOM);
+	if (unlikely(err)) {
+		kfree_skb(skb);
+		return -ENOMEM;
+	}
+
+	vxh = (struct vxlanhdr *)__skb_push(skb, sizeof(*vxh));
+	vxh->vx_flags = htonl(VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH);
+	vxh->vx_vni = htonl(vni << 8);
+
+	return udp_tunnel_xmit_skb(sock, rt, skb, src, dst, 0, NSH_VXLAN_TTL,
+				   0, src_port, dst_port, net);
+}
+
 static int nsh_xmit_vxlan(struct sk_buff *skb, struct nsh_net *nnet,
 			  struct nsh_dev *ndev, struct nsh_table *nt,
 			  __be16 src_port)
 {
-	int err;
 	struct flowi4 fl4;
 	struct rtable *rt;
-	struct vxlanhdr *vxh;
 
 	memset(&fl4, 0, sizeof(fl4));
 	fl4.daddr = nt->rdst->remote_ip;
@@ -391,19 +414,9 @@ static int nsh_xmit_vxlan(struct sk_buff *skb, struct nsh_net *nnet,
 		return -ENOENT;
 	}
 
-	err = skb_cow_head(skb, VXLAN_HEADROOM);
-	if (unlikely(err)) {
-		kfree_skb(skb);
-		return -ENOMEM;
-	}
-
-	vxh = (struct vxlanhdr *)__skb_push(skb, sizeof(*vxh));
-	vxh->vx_flags = htonl(VXLAN_GPE_FLAGS | VXLAN_GPE_PROTO_NSH);
-	vxh->vx_vni = htonl(nt->rdst->vni << 8);
-
-	return udp_tunnel_xmit_skb(nnet->sock, rt, skb, fl4.saddr,
-				   nt->rdst->remote_ip, 0, NSH_VXLAN_TTL, 0,
-				   src_port, VXLAN_GPE_PORT, nnet->net);
+	return nsh_xmit_vxlan_skb(nnet->sock, nnet->net, rt,
+				  skb, fl4.saddr, nt->rdst->remote_ip,
+				  src_port, VXLAN_GPE_PORT, nt->rdst->vni);
 }
 
 static int nsh_xmit_ether(struct sk_buff *skb, struct nsh_net *nnet,

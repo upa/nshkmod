@@ -404,6 +404,8 @@ static int nsh_xmit_vxlan(struct sk_buff *skb, struct nsh_net *nnet,
 	memset(&fl4, 0, sizeof(fl4));
 	fl4.daddr = nt->rdst->remote_ip;
 	fl4.saddr = nt->rdst->local_ip;
+	if (nt->rdst->lowerdev)
+		fl4.flowi4_oif = nt->rdst->lowerdev->ifindex;
 
 	rt = ip_route_output_key(dev_net(ndev->dev), &fl4);
 	if (IS_ERR(rt)) {
@@ -933,6 +935,23 @@ static int nsh_nl_cmd_path_dst_set(struct sk_buff *skb,
 		dst->local_ip = local;
 		dst->vni = vni;
 
+		if (info->attrs[NSHKMOD_ATTR_IFINDEX]) {
+			ifindex =
+				nla_get_u32(info->attrs[NSHKMOD_ATTR_IFINDEX]);
+			lowerdev = __dev_get_by_index (net, ifindex);
+			if (!lowerdev) {
+				pr_debug ("ifindex %d does not exist\n",
+					  ifindex);
+				return -ENODEV;
+			}
+			if (lowerdev->netdev_ops == &nsh_netdev_ops) {
+				pr_debug("nsh device can't become "
+					 "link of a path\n");
+				return -EINVAL;
+			}
+			dst->lowerdev = lowerdev;
+		}
+
 		nsh_add_table(nnet, key, mdtype, encap_type, NULL, dst);
 		break;
 
@@ -1126,9 +1145,15 @@ static int nsh_nl_table_send(struct sk_buff *skb, u32 portid, u32 seq,
 		    nla_put_u32(skb, NSHKMOD_ATTR_VNI, dst->vni))
 			goto nla_put_failure;
 
-		if (nt->rdst->local_ip) {
+		if (dst->local_ip) {
 			if (nla_put_be32(skb, NSHKMOD_ATTR_LOCAL,
 					  dst->local_ip))
+				goto nla_put_failure;
+		}
+
+		if (dst->lowerdev) {
+			if (nla_put_u32 (skb, NSHKMOD_ATTR_IFINDEX,
+					 dst->lowerdev->ifindex))
 				goto nla_put_failure;
 		}
 

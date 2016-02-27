@@ -207,6 +207,10 @@ do_add (int argc, char ** argv)
 			addattr32 (&req.n, 1024, NSHKMOD_ATTR_LOCAL, p.local);
 		if (p.vni)
 			addattr32 (&req.n, 1024, NSHKMOD_ATTR_VNI, p.vni);
+		if (p.f_dev)
+			addattr32 (&req.n, 1024, NSHKMOD_ATTR_IFINDEX,
+				   p.ifindex);
+
 		break;
 
 	case NSH_ENCAP_TYPE_ETHER :
@@ -425,13 +429,25 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 
 		if (attrs[NSHKMOD_ATTR_LOCAL]) {
 			fprintf (stdout, "spi %u si %u mdtype %u "
-				 "encap %s remote %s local %s vni %u\n",
+				 "encap %s remote %s local %s vni %u",
 				 spi, si, mdtype, encap, remote, local, vni);
 		} else {
 			fprintf (stdout, "spi %u si %u mdtype %u "
-				 "encap %s remote %s vni %u\n",
+				 "encap %s remote %s vni %u",
 				 spi, si, mdtype, encap, remote, vni);
 		}
+
+		if (attrs[NSHKMOD_ATTR_IFINDEX]) {
+			ifindex =
+				rta_getattr_u32 (attrs[NSHKMOD_ATTR_IFINDEX]);
+			if (!if_indextoname (ifindex, devname)) {
+				fprintf (stderr, " ifindex %d does not exit\n",
+					 ifindex);
+				return -1;
+			}
+			fprintf (stdout, " dev %s\n", devname);
+		} else
+			fprintf (stdout, "\n");
 
 		break;
 

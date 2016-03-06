@@ -35,10 +35,8 @@ struct nsh_param {
 
 	int f_spisi;
 	int f_encap;
-	int f_dev;
 	int f_remote;
 	int f_mac;
-	int f_link;
 };
 
 static void usage (void) __attribute ((noreturn));
@@ -59,7 +57,6 @@ parse_args (int argc, char ** argv, struct nsh_param * p)
 				invarg ("invalid device", *argv);
 				exit (-1);
 			}
-			p->f_dev++;
 		} else if (strcmp (*argv, "spi") == 0) {
 			NEXT_ARG ();
 			if (get_u32 (&p->spi, *argv, 0)) {
@@ -125,14 +122,6 @@ parse_args (int argc, char ** argv, struct nsh_param * p)
 				exit (-1);
 			}
 			p->f_mac++;
-		} else if (strcmp (*argv, "link") == 0) {
-			NEXT_ARG ();
-			p->ifindex = if_nametoindex (*argv);
-			if (!p->ifindex) {
-				invarg ("invalid device", *argv);
-				exit (-1);
-			}
-			p->f_link++;
 		}
 		argc--;
 		argv++;
@@ -148,12 +137,11 @@ usage (void)
 		 "usage:  ip nsh { add | del } "
 		 "[ spi SPI ] [ si SI ] [ mdtype { 1 | 2 } ]\n"
 		 "                [ encap { none | vxlan | ether } ]\n"
-		 "                [ dev DEVICE ]\n"
 		 "                [ remote ADDR ]\n"
 		 "                [ local ADDR ]\n"
 		 "                [ vni VNI ]\n"
 		 "                [ dst MACADDR ]\n"
-		 "                [ link DEVICE ]\n"
+		 "                [ dev DEVICE ]\n"
 		 "\n"
 		 "        ip nsh { set | unset } "
 		 "[ dev DEVICE ] [ spi SPI ] [ si SI] \n"
@@ -189,8 +177,8 @@ do_add (int argc, char ** argv)
 
 	switch (p.encap_type) {
 	case NSH_ENCAP_TYPE_NONE :
-		if (!p.f_dev) {
-			fprintf (stderr, "encap none needs 'device'\n");
+		if (!p.ifindex) {
+			fprintf (stderr, "encap type none needs 'dev'\n");
 			exit (-1);
 		}
 		addattr32 (&req.n, 1024, NSHKMOD_ATTR_IFINDEX, p.ifindex);
@@ -198,7 +186,7 @@ do_add (int argc, char ** argv)
 
 	case NSH_ENCAP_TYPE_VXLAN :
 		if (!p.f_remote) {
-			fprintf (stderr, "encap vxlan needs 'remote'\n");
+			fprintf (stderr, "encap type vxlan needs 'remote'\n");
 			exit (-1);
 		}
 		addattr32 (&req.n, 1024, NSHKMOD_ATTR_REMOTE, p.remote);
@@ -207,16 +195,16 @@ do_add (int argc, char ** argv)
 			addattr32 (&req.n, 1024, NSHKMOD_ATTR_LOCAL, p.local);
 		if (p.vni)
 			addattr32 (&req.n, 1024, NSHKMOD_ATTR_VNI, p.vni);
-		if (p.f_dev)
+		if (p.ifindex)
 			addattr32 (&req.n, 1024, NSHKMOD_ATTR_IFINDEX,
 				   p.ifindex);
 
 		break;
 
 	case NSH_ENCAP_TYPE_ETHER :
-		if (!p.f_mac || !p.f_link) {
+		if (!p.f_mac || !p.ifindex) {
 			fprintf (stderr,
-				 "encap ether needs 'dst' and 'link'\n");
+				 "encap type ether needs 'dst' and 'dev'\n");
 			exit (-1);
 		}
 		addattr32(&req.n, 1024, NSHKMOD_ATTR_IFINDEX, p.ifindex);
@@ -462,7 +450,7 @@ path_nlmsg (const struct sockaddr_nl * who, struct nlmsghdr * n, void * arg)
 		memcpy (mac, RTA_DATA (attrs[NSHKMOD_ATTR_ETHADDR]), ETH_ALEN);
 
 		fprintf (stdout, "spi %u si %u mdtype %u "
-			 "encap %s dst %x:%x:%x:%x:%x:%x link %s\n",
+			 "encap %s dst %x:%x:%x:%x:%x:%x dev %s\n",
 			 spi, si, mdtype, encap, mac[0], mac[1], mac[2],
 			 mac[3], mac[4], mac[5], devname);
 		break;

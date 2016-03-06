@@ -176,6 +176,7 @@ struct nsh_net {
 };
 
 
+
 static inline struct hlist_head *nsh_table_head(struct nsh_net *nnet,
 						 __be32 key) {
 	return &nnet->nsh_table[hash_32(key, NSH_HASH_BITS)];
@@ -250,9 +251,13 @@ static void nsh_destroy_table(struct nsh_net *nnet)
 	}
 }
 
+static netdev_tx_t nsh_xmit_one(struct sk_buff *skb, struct net *net,
+				struct net_device *dev, __be32 key);
+
 static int nsh_recv(struct net *net, struct sk_buff *skb)
 {
 	int hdrlen;
+	__be32 key;
 	struct nsh_base_hdr *nbh;
 	struct nsh_path_hdr *nph;
 	struct nsh_table *nt;
@@ -283,25 +288,32 @@ static int nsh_recv(struct net *net, struct sk_buff *skb)
 		return -1;
 	}
 
-	nt = nsh_find_table(nnet, nph->spisi);
-	if (!nt || !nt->rdev)
-		return -1;
+	key = nph->spisi;
 
 	hdrlen = NSH_BASE_LENGTH(nbh->length) << 2;
 	__skb_pull(skb, hdrlen);
-	skb_reset_mac_header(skb);
-	skb->protocol = eth_type_trans(skb, nt->rdev->dev);
 	skb->encapsulation = 0;
-	skb_scrub_packet(skb, !net_eq(net, dev_net(nt->rdev->dev)));
+	skb_reset_mac_header(skb);
 	skb_reset_network_header(skb);
 
-	stats = this_cpu_ptr(nt->rdev->dev->tstats);
-	u64_stats_update_begin(&stats->syncp);
-	stats->rx_packets++;
-	stats->rx_bytes += skb->len;
-	u64_stats_update_end(&stats->syncp);
-
-	netif_rx(skb);
+	/* find own nsh interfaces (like connected interface) */
+	nt = nsh_find_table(nnet, key);
+	if (nt && nt->rdev) {
+		skb->protocol = eth_type_trans(skb, nt->rdev->dev);
+		skb_scrub_packet(skb, !net_eq(net, dev_net(nt->rdev->dev)));
+		stats = this_cpu_ptr(nt->rdev->dev->tstats);
+		u64_stats_update_begin(&stats->syncp);
+		stats->rx_packets++;
+		stats->rx_bytes += skb->len;
+		u64_stats_update_end(&stats->syncp);
+		netif_rx(skb);
+	} else {
+		/* Forward NSH packet in nsh layer.
+		 * decrease service index try to xmit the packet */
+		skb_scrub_packet(skb, false);
+		key = htonl (ntohl (key) - 1);	/* decrease service index */
+		nsh_xmit_one(skb, net, NULL, key);
+	}
 
 	return 0;
 }
@@ -394,8 +406,8 @@ static int nsh_xmit_vxlan_skb(struct socket *sock, struct net * net,
 				   0, src_port, dst_port, net);
 }
 
-static int nsh_xmit_vxlan(struct sk_buff *skb, struct nsh_net *nnet,
-			  struct nsh_dev *ndev, struct nsh_table *nt,
+static int nsh_xmit_vxlan(struct sk_buff *skb, struct net_device *dev,
+			  struct nsh_net *nnet, struct nsh_table *nt,
 			  __be16 src_port)
 {
 	struct flowi4 fl4;
@@ -407,12 +419,15 @@ static int nsh_xmit_vxlan(struct sk_buff *skb, struct nsh_net *nnet,
 	if (nt->rdst->lowerdev)
 		fl4.flowi4_oif = nt->rdst->lowerdev->ifindex;
 
-	rt = ip_route_output_key(dev_net(ndev->dev), &fl4);
+	rt = ip_route_output_key(nnet->net, &fl4);
 	if (IS_ERR(rt)) {
-		netdev_dbg(ndev->dev, "no route found to %pI4\n",
-			   (struct in_addr *)&nt->rdst->remote_ip);
-		ndev->dev->stats.tx_carrier_errors++;
-		ndev->dev->stats.tx_dropped++;
+		if (net_ratelimit ())
+			pr_debug ("no route found to %pI4\n",
+				  (struct in_addr *)&nt->rdst->remote_ip);
+		if (dev) {
+			dev->stats.tx_carrier_errors++;
+			dev->stats.tx_dropped++;
+		}
 		return -ENOENT;
 	}
 
@@ -421,8 +436,7 @@ static int nsh_xmit_vxlan(struct sk_buff *skb, struct nsh_net *nnet,
 				  src_port, VXLAN_GPE_PORT, nt->rdst->vni);
 }
 
-static int nsh_xmit_ether(struct sk_buff *skb, struct nsh_net *nnet,
-			  struct nsh_dev *ndev, struct nsh_table *nt)
+static int nsh_xmit_ether(struct sk_buff *skb, struct nsh_table *nt)
 {
 	int err;
 	struct ethhdr *eth;
@@ -452,23 +466,24 @@ static int nsh_xmit_ether(struct sk_buff *skb, struct nsh_net *nnet,
 	return dev_queue_xmit(skb);
 }
 
-static netdev_tx_t nsh_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t nsh_xmit_one(struct sk_buff *skb, struct net *net,
+				struct net_device *dev, __be32 key)
+
 {
 	int rc;
 	unsigned int len, nhlen;
 	__be16 src_port = VXLAN_GPE_PORT;
 	struct pcpu_sw_netstats *tx_stats;
-	struct nsh_dev *ndev = netdev_priv(dev);
-	struct nsh_net *nnet = net_generic(dev_net(dev), nsh_net_id);
+	struct nsh_net *nnet = net_generic(net, nsh_net_id);
 	struct nsh_table *nt;
 	struct nsh_base_hdr *nbh;
 	struct nsh_path_hdr *nph;
 	struct nsh_ctx_type1 *ctx;
 
-	nt = nsh_find_table(nnet, ndev->key);
+	nt = nsh_find_table(nnet, key);
 	if (!nt) {
 		if (net_ratelimit())
-			netdev_dbg(dev, "path is not assigned\n");
+			pr_debug("path is not assigned for %x\n", ntohl (key));
 		goto tx_err;
 	}
 
@@ -490,12 +505,12 @@ static netdev_tx_t nsh_xmit(struct sk_buff *skb, struct net_device *dev)
 		/* get udp src port for ether hash before encapsulation.
 		 * XXX: src_port_max and _min should be implemented.
 		 * 0, 0, means default src port range. */
-		src_port = udp_flow_src_port(dev_net(dev), skb, 0, 0, true);
+		src_port = udp_flow_src_port(net, skb, 0, 0, true);
 	}
 
 	rc = skb_cow_head(skb, nhlen);
 	if (unlikely(rc)) {
-		netdev_dbg(dev, "failed to skb_cow_head\n");
+		pr_debug("failed to skb_cow_head\n");
 		kfree_skb(skb);
 		goto tx_err;
 	}
@@ -510,7 +525,7 @@ static netdev_tx_t nsh_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	nph = (struct nsh_path_hdr *)__skb_push(skb, sizeof(*nph));
-	nph->spisi = ndev->key;
+	nph->spisi = key;
 
 	nbh = (struct nsh_base_hdr *)__skb_push(skb, sizeof(*nbh));
 	nbh->flags	= 0;
@@ -520,42 +535,52 @@ static netdev_tx_t nsh_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	if (nt->rdev) {
 		/* nexthop is nsh interface in this machine. */
-		nsh_recv(dev_net(dev), skb);
+		nsh_recv(net, skb);
 		goto update_stats;
 	}
 
 	if (nt->rdst) {
 		switch (nt->encap_type) {
 		case NSH_ENCAP_TYPE_VXLAN:
-			rc = nsh_xmit_vxlan(skb, nnet, ndev, nt, src_port);
+			rc = nsh_xmit_vxlan(skb, dev, nnet, nt, src_port);
 			if (rc < 0)
 				goto tx_err;
 			break;
 		case NSH_ENCAP_TYPE_ETHER:
-			rc = nsh_xmit_ether(skb, nnet, ndev, nt);
+			rc = nsh_xmit_ether(skb, nt);
 			if (rc < 0)
 				goto tx_err;
 			break;
 		default:
-			netdev_dbg(dev, "invalid encap type %d\n",
-				   nt->encap_type);
+			pr_debug("invalid encap type %d\n",
+				 nt->encap_type);
 			goto tx_err;
 		}
 	}
 
 update_stats:
-	tx_stats = this_cpu_ptr(dev->tstats);
-	u64_stats_update_begin(&tx_stats->syncp);
-	tx_stats->tx_packets++;
-	tx_stats->tx_bytes += len;
-	u64_stats_update_end(&tx_stats->syncp);
+	if (dev) {
+		tx_stats = this_cpu_ptr(dev->tstats);
+		u64_stats_update_begin(&tx_stats->syncp);
+		tx_stats->tx_packets++;
+		tx_stats->tx_bytes += len;
+		u64_stats_update_end(&tx_stats->syncp);
+	}
 
 	return NETDEV_TX_OK;
 
 tx_err:
-	dev->stats.tx_errors++;
+	if (dev)
+		dev->stats.tx_errors++;
 
 	return NETDEV_TX_OK;
+}
+
+static netdev_tx_t nsh_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	struct nsh_dev *ndev = netdev_priv(dev);
+
+	return nsh_xmit_one (skb, dev_net (dev), dev, ndev->key);
 }
 
 /* setup stats when device is created */
